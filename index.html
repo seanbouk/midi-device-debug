@@ -24,9 +24,11 @@
   .sub { color: var(--muted); margin: 0 0 24px; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
   @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px;
+    margin-bottom: 16px; }
   .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
     color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  .panel h2 .hint { font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: 8px; }
   button { background: var(--accent); color: #0f1117; border: 0; padding: 10px 16px;
     border-radius: 6px; font: inherit; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -50,20 +52,64 @@
   #log .entry.note-on { color: var(--note); }
   #log .entry.note-off { color: var(--muted); }
   #log .entry.cc { color: var(--warn); }
-  .controls { display: flex; gap: 8px; margin-bottom: 12px; }
+  .controls { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
   code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 3px; }
+  .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  select { background: #0a0c12; color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; font: inherit; min-width: 240px; }
+  .engine-controls { padding-top: 8px; border-top: 1px dashed var(--border); margin-top: 8px; }
+  .engine-controls.hidden { display: none; }
+  .engine-status { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .engine-status.warn { color: var(--warn); }
 </style>
 </head>
 <body>
 <main>
   <h1>Web MIDI debug</h1>
-  <p class="sub">Lists MIDI devices visible to the browser and logs incoming messages in real time.</p>
+  <p class="sub">Lists MIDI devices visible to the browser, logs incoming messages, and routes them to one of three sound engines.</p>
 
   <div id="status" class="status">Click <strong>Request MIDI access</strong> to begin.</div>
 
   <div class="controls">
     <button id="request">Request MIDI access</button>
+    <button id="panic" class="secondary" disabled>Panic (all notes off)</button>
     <button id="clear" class="secondary" disabled>Clear log</button>
+  </div>
+
+  <div class="panel">
+    <h2>Sound engine <span class="hint">routes incoming MIDI to a sound source</span></h2>
+
+    <div class="field">
+      <label for="engine">Engine</label>
+      <select id="engine">
+        <option value="none">None (log only)</option>
+        <option value="osc">Web Audio oscillator</option>
+        <option value="soundfont" selected>Soundfont sampler</option>
+      </select>
+    </div>
+
+    <div id="engine-osc" class="engine-controls hidden">
+      <div class="field">
+        <label for="osc-type">Waveform</label>
+        <select id="osc-type">
+          <option value="triangle">triangle</option>
+          <option value="sine">sine</option>
+          <option value="sawtooth">sawtooth</option>
+          <option value="square">square</option>
+          <option value="noise">noise</option>
+        </select>
+      </div>
+      <div class="engine-status">Pure synthesis with one voice per note. Noise is white noise looped, with playback rate mapped to MIDI pitch.</div>
+    </div>
+
+    <div id="engine-soundfont" class="engine-controls hidden">
+      <div class="field">
+        <label for="sf-instrument">Instrument (General MIDI)</label>
+        <select id="sf-instrument"></select>
+      </div>
+      <div id="sf-status" class="engine-status">Loads sampled instruments from the public MIDI.js soundfont CDN. First note may have a brief delay while the instrument downloads.</div>
+    </div>
   </div>
 
   <div class="row">
@@ -83,6 +129,7 @@
   </div>
 </main>
 
+<script src="https://cdn.jsdelivr.net/npm/soundfont-player@0.12.0/dist/soundfont-player.min.js"></script>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -92,27 +139,24 @@
   const logEl = $('log');
   const requestBtn = $('request');
   const clearBtn = $('clear');
+  const panicBtn = $('panic');
+
+  const engineSelect = $('engine');
+  const oscEngineEl = $('engine-osc');
+  const sfEngineEl = $('engine-soundfont');
+  const oscTypeSelect = $('osc-type');
+  const sfInstrumentSelect = $('sf-instrument');
+  const sfStatusEl = $('sf-status');
 
   let access = null;
+  let audioCtx = null;
+  let engine = null;
+
+  // ---------- helpers ----------
 
   const setStatus = (msg, kind = '') => {
     statusEl.className = 'status' + (kind ? ' ' + kind : '');
     statusEl.innerHTML = msg;
-  };
-
-  const renderPorts = (map, el) => {
-    const items = [...map.values()];
-    if (items.length === 0) { el.innerHTML = '<li class="empty">none</li>'; return; }
-    el.innerHTML = items.map(p => `
-      <li>
-        <div class="name">${escapeHtml(p.name || '(unnamed)')}</div>
-        <div class="meta">
-          ${escapeHtml(p.manufacturer || 'unknown manufacturer')}
-          &middot; state: ${p.state}
-          &middot; connection: ${p.connection}
-          &middot; id: ${escapeHtml(p.id)}
-        </div>
-      </li>`).join('');
   };
 
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({
@@ -125,7 +169,7 @@
   };
 
   const decode = (data) => {
-    const [s, d1, d2] = data;
+    const [s, d1, d2 = 0] = data;
     const type = s & 0xf0;
     const ch = (s & 0x0f) + 1;
     if (type === 0x90 && d2 > 0) return { kind: 'note-on',  text: `ch${ch} note-on  ${noteName(d1)} (${d1}) vel=${d2}` };
@@ -150,17 +194,264 @@
     if (logEl.children.length > 500) logEl.removeChild(logEl.firstChild);
   };
 
-  const wireInputs = () => {
-    for (const input of access.inputs.values()) {
-      input.onmidimessage = (e) => log(input.name || input.id, e.data);
+  const logSystem = (text) => {
+    const ts = new Date().toISOString().substr(11, 12);
+    const line = document.createElement('div');
+    line.className = 'entry';
+    line.innerHTML = `<span class="ts">${ts}</span> <span class="src">[system]</span> ${escapeHtml(text)}`;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+
+  // ---------- engines ----------
+
+  // Pure Web Audio oscillator-per-voice synth, with a noise voice backed by
+  // a looped white-noise buffer. Per-waveform gain compensation tries to land
+  // each waveform at roughly equal perceived loudness — sine has all its
+  // energy at the fundamental and is hugely under-loud relative to the
+  // harmonic-rich waves, so it gets a big boost. A DynamicsCompressor on the
+  // master tames the resulting peaks when several voices stack.
+  const OSC_TYPE_GAIN = { sine: 4.0, triangle: 1.6, sawtooth: 0.55, square: 0.45, noise: 0.5 };
+  class OscEngine {
+    constructor(ctx, type = 'triangle') {
+      this.ctx = ctx;
+      this.type = type;
+      this.master = ctx.createGain();
+      this.master.gain.value = 0.25;
+      this.comp = ctx.createDynamicsCompressor();
+      this.master.connect(this.comp);
+      this.comp.connect(ctx.destination);
+      this.voices = new Map();
+      this.noiseBuffer = null;
+    }
+    setType(t) { this.type = t; }
+    ensureNoiseBuffer() {
+      if (this.noiseBuffer) return this.noiseBuffer;
+      const seconds = 2;
+      const buf = this.ctx.createBuffer(1, seconds * this.ctx.sampleRate, this.ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      this.noiseBuffer = buf;
+      return buf;
+    }
+    noteOn(ch, n, v) {
+      this.noteOff(ch, n);
+      let src;
+      if (this.type === 'noise') {
+        src = this.ctx.createBufferSource();
+        src.buffer = this.ensureNoiseBuffer();
+        src.loop = true;
+        src.playbackRate.value = Math.pow(2, (n - 69) / 12);
+      } else {
+        src = this.ctx.createOscillator();
+        src.type = this.type;
+        src.frequency.value = 440 * Math.pow(2, (n - 69) / 12);
+      }
+      const g = this.ctx.createGain();
+      g.gain.value = 0;
+      src.connect(g); g.connect(this.master);
+      const t = this.ctx.currentTime;
+      const typeGain = OSC_TYPE_GAIN[this.type] || 1;
+      const peak = (v / 127) * 0.6 * typeGain;
+      g.gain.linearRampToValueAtTime(peak, t + 0.01);
+      src.start();
+      this.voices.set(`${ch}-${n}`, { osc: src, g });
+    }
+    noteOff(ch, n) {
+      const k = `${ch}-${n}`;
+      const v = this.voices.get(k);
+      if (!v) return;
+      const t = this.ctx.currentTime;
+      v.g.gain.cancelScheduledValues(t);
+      v.g.gain.setValueAtTime(v.g.gain.value, t);
+      v.g.gain.linearRampToValueAtTime(0.0001, t + 0.12);
+      v.osc.stop(t + 0.14);
+      this.voices.delete(k);
+    }
+    panic() {
+      for (const k of [...this.voices.keys()]) {
+        const [ch, n] = k.split('-').map(Number);
+        this.noteOff(ch, n);
+      }
+    }
+    destroy() {
+      this.panic();
+      setTimeout(() => {
+        try { this.master.disconnect(); } catch (_) {}
+        try { this.comp.disconnect(); } catch (_) {}
+      }, 250);
+    }
+  }
+
+  // Sample-based GM synth via soundfont-player.
+  class SoundfontEngine {
+    constructor(ctx) {
+      this.ctx = ctx;
+      this.master = ctx.createGain();
+      this.master.gain.value = 1.0;
+      this.master.connect(ctx.destination);
+      this.inst = null;
+      this.instName = null;
+      this.voices = new Map();
+      this.loadToken = 0;
+    }
+    async load(name) {
+      const token = ++this.loadToken;
+      this.panic();
+      sfStatusEl.textContent = `Loading "${name}"…`;
+      sfStatusEl.classList.remove('warn');
+      try {
+        const inst = await Soundfont.instrument(this.ctx, name, { destination: this.master });
+        if (token !== this.loadToken) return; // superseded by another load
+        this.inst = inst;
+        this.instName = name;
+        sfStatusEl.textContent = `Loaded "${name}".`;
+      } catch (err) {
+        sfStatusEl.textContent = `Failed to load "${name}": ${err.message || err}`;
+        sfStatusEl.classList.add('warn');
+      }
+    }
+    noteOn(ch, n, v) {
+      if (!this.inst) return;
+      this.noteOff(ch, n);
+      const node = this.inst.play(n, this.ctx.currentTime, { gain: (v / 127) * 1.5 });
+      this.voices.set(`${ch}-${n}`, node);
+    }
+    noteOff(ch, n) {
+      const k = `${ch}-${n}`;
+      const node = this.voices.get(k);
+      if (node) {
+        try { node.stop(this.ctx.currentTime); } catch (_) {}
+        this.voices.delete(k);
+      }
+    }
+    panic() {
+      for (const node of this.voices.values()) { try { node.stop(); } catch (_) {} }
+      this.voices.clear();
+    }
+    destroy() {
+      this.panic();
+      setTimeout(() => { try { this.master.disconnect(); } catch (_) {} }, 250);
+    }
+  }
+
+  // ---------- dispatcher ----------
+
+  const dispatch = (data) => {
+    if (!engine) return;
+    const [s, d1, d2 = 0] = data;
+    const type = s & 0xf0;
+    const ch = (s & 0x0f) + 1;
+    if (type === 0x90 && d2 > 0) engine.noteOn?.(ch, d1, d2);
+    else if (type === 0x80 || (type === 0x90 && d2 === 0)) engine.noteOff?.(ch, d1);
+    else if (type === 0xb0) engine.cc?.(ch, d1, d2);
+    else if (type === 0xc0) engine.pc?.(ch, d1);
+    else if (type === 0xe0) engine.pitch?.(ch, d1, d2);
+  };
+
+  // ---------- engine wiring ----------
+
+  const ensureAudioCtx = () => {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  };
+
+  const swapEngine = async (kind) => {
+    if (engine) { try { engine.destroy(); } catch (_) {} engine = null; }
+    oscEngineEl.classList.add('hidden');
+    sfEngineEl.classList.add('hidden');
+
+    if (kind === 'osc') {
+      oscEngineEl.classList.remove('hidden');
+      engine = new OscEngine(ensureAudioCtx(), oscTypeSelect.value);
+    } else if (kind === 'soundfont') {
+      sfEngineEl.classList.remove('hidden');
+      if (typeof Soundfont === 'undefined') {
+        sfStatusEl.textContent = 'soundfont-player failed to load (CDN unreachable?).';
+        sfStatusEl.classList.add('warn');
+        return;
+      }
+      engine = new SoundfontEngine(ensureAudioCtx());
+      await engine.load(sfInstrumentSelect.value);
     }
   };
 
-  const refresh = () => {
+  // ---------- port rendering ----------
+
+  const renderPorts = (map, el) => {
+    const items = [...map.values()];
+    if (items.length === 0) { el.innerHTML = '<li class="empty">none</li>'; return; }
+    el.innerHTML = items.map(p => `
+      <li>
+        <div class="name">${escapeHtml(p.name || '(unnamed)')}</div>
+        <div class="meta">
+          ${escapeHtml(p.manufacturer || 'unknown manufacturer')}
+          &middot; state: ${p.state}
+          &middot; connection: ${p.connection}
+          &middot; id: ${escapeHtml(p.id)}
+        </div>
+      </li>`).join('');
+  };
+
+  const wireInputs = () => {
+    for (const input of access.inputs.values()) {
+      input.onmidimessage = (e) => {
+        log(input.name || input.id, e.data);
+        dispatch(e.data);
+      };
+    }
+  };
+
+  const refreshAll = () => {
     renderPorts(access.inputs, inputsEl);
     renderPorts(access.outputs, outputsEl);
     wireInputs();
   };
+
+  // ---------- GM instrument list ----------
+
+  const GM_INSTRUMENTS = [
+    'acoustic_grand_piano','bright_acoustic_piano','electric_grand_piano','honkytonk_piano',
+    'electric_piano_1','electric_piano_2','harpsichord','clavinet',
+    'celesta','glockenspiel','music_box','vibraphone','marimba','xylophone','tubular_bells','dulcimer',
+    'drawbar_organ','percussive_organ','rock_organ','church_organ','reed_organ','accordion','harmonica','tango_accordion',
+    'acoustic_guitar_nylon','acoustic_guitar_steel','electric_guitar_jazz','electric_guitar_clean',
+    'electric_guitar_muted','overdriven_guitar','distortion_guitar','guitar_harmonics',
+    'acoustic_bass','electric_bass_finger','electric_bass_pick','fretless_bass',
+    'slap_bass_1','slap_bass_2','synth_bass_1','synth_bass_2',
+    'violin','viola','cello','contrabass','tremolo_strings','pizzicato_strings','orchestral_harp','timpani',
+    'string_ensemble_1','string_ensemble_2','synth_strings_1','synth_strings_2',
+    'choir_aahs','voice_oohs','synth_choir','orchestra_hit',
+    'trumpet','trombone','tuba','muted_trumpet','french_horn','brass_section','synth_brass_1','synth_brass_2',
+    'soprano_sax','alto_sax','tenor_sax','baritone_sax','oboe','english_horn','bassoon','clarinet',
+    'piccolo','flute','recorder','pan_flute','blown_bottle','shakuhachi','whistle','ocarina',
+    'lead_1_square','lead_2_sawtooth','lead_3_calliope','lead_4_chiff',
+    'lead_5_charang','lead_6_voice','lead_7_fifths','lead_8_bass__lead',
+    'pad_1_new_age','pad_2_warm','pad_3_polysynth','pad_4_choir',
+    'pad_5_bowed','pad_6_metallic','pad_7_halo','pad_8_sweep',
+    'fx_1_rain','fx_2_soundtrack','fx_3_crystal','fx_4_atmosphere',
+    'fx_5_brightness','fx_6_goblins','fx_7_echoes','fx_8_scifi',
+    'sitar','banjo','shamisen','koto','kalimba','bagpipe','fiddle','shanai',
+    'tinkle_bell','agogo','steel_drums','woodblock','taiko_drum','melodic_tom','synth_drum','reverse_cymbal',
+    'guitar_fret_noise','breath_noise','seashore','bird_tweet','telephone_ring','helicopter','applause','gunshot'
+  ];
+
+  sfInstrumentSelect.innerHTML = GM_INSTRUMENTS.map((n, i) =>
+    `<option value="${n}">${i + 1}. ${n.replace(/_/g, ' ')}</option>`).join('');
+
+  // ---------- event handlers ----------
+
+  engineSelect.addEventListener('change', () => swapEngine(engineSelect.value));
+  oscTypeSelect.addEventListener('change', () => {
+    if (engine instanceof OscEngine) engine.setType(oscTypeSelect.value);
+  });
+  sfInstrumentSelect.addEventListener('change', () => {
+    if (engine instanceof SoundfontEngine) engine.load(sfInstrumentSelect.value);
+  });
+
+  panicBtn.addEventListener('click', () => { if (engine) engine.panic?.(); });
+  clearBtn.addEventListener('click', () => { logEl.innerHTML = ''; });
 
   requestBtn.addEventListener('click', async () => {
     if (!navigator.requestMIDIAccess) {
@@ -170,29 +461,26 @@
     try {
       requestBtn.disabled = true;
       access = await navigator.requestMIDIAccess({ sysex: false });
+      ensureAudioCtx(); // create it now while we have a user gesture
       const total = access.inputs.size + access.outputs.size;
       setStatus(`MIDI access granted. ${access.inputs.size} input(s), ${access.outputs.size} output(s).`,
                 total > 0 ? 'ok' : 'warn');
-      refresh();
+      refreshAll();
       access.onstatechange = (e) => {
         const p = e.port;
-        const ts = new Date().toISOString().substr(11, 12);
-        const line = document.createElement('div');
-        line.className = 'entry';
-        line.innerHTML = `<span class="ts">${ts}</span> <span class="src">[system]</span> ` +
-          `${escapeHtml(p.type)} "${escapeHtml(p.name)}" ${p.state}/${p.connection}`;
-        logEl.appendChild(line);
-        logEl.scrollTop = logEl.scrollHeight;
-        refresh();
+        logSystem(`${p.type} "${p.name}" ${p.state}/${p.connection}`);
+        refreshAll();
       };
       clearBtn.disabled = false;
+      panicBtn.disabled = false;
+      swapEngine(engineSelect.value);
     } catch (err) {
       setStatus(`MIDI access failed: ${escapeHtml(err.message || String(err))}`, 'error');
       requestBtn.disabled = false;
     }
   });
 
-  clearBtn.addEventListener('click', () => { logEl.innerHTML = ''; });
+  // ---------- initial state ----------
 
   if (!navigator.requestMIDIAccess) {
     setStatus('Web MIDI is not supported in this browser. Try Chrome, Edge, or Safari 16.4+.', 'error');
