@@ -20,8 +20,23 @@
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
     font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
   main { max-width: 960px; margin: 0 auto; padding: 24px; }
-  h1 { font-size: 18px; margin: 0 0 4px; }
+  h1 { font-size: 18px; margin: 0; }
   .sub { color: var(--muted); margin: 0 0 24px; }
+  .topbar { display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+    margin-bottom: 4px; }
+  .panic-link { color: var(--error); text-decoration: underline; font-size: 13px; cursor: pointer;
+    white-space: nowrap; }
+  .panic-link:hover { text-decoration-thickness: 2px; }
+  .panic-link[aria-disabled="true"] { opacity: 0.35; pointer-events: none; }
+  .access-row { display: flex; gap: 16px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+  .status-inline { color: var(--muted); font-size: 13px; }
+  .status-inline.ok { color: var(--accent); }
+  .status-inline.warn { color: var(--warn); }
+  .status-inline.error { color: var(--error); }
+  .link-action { color: var(--muted); text-decoration: underline; font-size: 12px;
+    font-weight: 400; text-transform: none; letter-spacing: normal; cursor: pointer; margin-left: 10px; }
+  .link-action:hover { color: var(--text); }
+  .link-action[aria-disabled="true"] { opacity: 0.35; pointer-events: none; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
   @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px;
@@ -33,17 +48,13 @@
     border-radius: 6px; font: inherit; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
-  .status { padding: 10px 12px; border-radius: 6px; background: var(--panel); border: 1px solid var(--border);
-    margin-bottom: 16px; }
-  .status.ok { border-color: var(--accent); }
-  .status.warn { border-color: var(--warn); }
-  .status.error { border-color: var(--error); }
   ul { list-style: none; padding: 0; margin: 0; }
   li { padding: 8px 10px; border-radius: 4px; background: rgba(255,255,255,0.02);
     margin-bottom: 4px; font-size: 13px; }
   li .name { font-weight: 600; }
   li .meta { color: var(--muted); font-size: 12px; }
   .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  .panel h2.with-action { display: flex; align-items: baseline; }
   #log { height: 320px; overflow-y: auto; background: #0a0c12; border: 1px solid var(--border);
     border-radius: 6px; padding: 8px; font-size: 12px; }
   #log .entry { padding: 2px 6px; white-space: pre; }
@@ -78,19 +89,27 @@
   .led { width: 10px; height: 10px; border-radius: 50%; background: rgba(255,255,255,0.08);
     border: 1px solid var(--border); display: inline-block; }
   .led.on { background: var(--warn); border-color: var(--warn); box-shadow: 0 0 8px rgba(251,191,36,0.6); }
+  .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg label { padding: 6px 12px; cursor: pointer; background: #0a0c12; color: var(--text);
+    font-size: 13px; border-right: 1px solid var(--border); user-select: none; }
+  .seg label:last-of-type { border-right: none; }
+  .seg input:checked + label { background: var(--accent); color: #0f1117; font-weight: 600; }
+  .seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: -2px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Web MIDI debug</h1>
+  <header class="topbar">
+    <h1>Web MIDI debug</h1>
+    <a id="panic" class="panic-link" href="#" aria-disabled="true">Panic (all notes off)</a>
+  </header>
   <p class="sub">Lists MIDI devices visible to the browser, logs incoming messages, and routes them to one of three sound engines.</p>
 
-  <div id="status" class="status">Click <strong>Request MIDI access</strong> to begin.</div>
-
-  <div class="controls">
+  <div class="access-row">
     <button id="request">Request MIDI access</button>
-    <button id="panic" class="secondary" disabled>Panic (all notes off)</button>
-    <button id="clear" class="secondary" disabled>Clear log</button>
+    <div id="status" class="status-inline"></div>
   </div>
 
   <div class="panel">
@@ -100,23 +119,41 @@
       <label for="engine">Engine</label>
       <select id="engine">
         <option value="none">None (log only)</option>
-        <option value="osc">Web Audio oscillator</option>
+        <option value="osc">PSG Synth</option>
+        <option value="fm">FM synth</option>
         <option value="soundfont" selected>Soundfont sampler</option>
       </select>
     </div>
 
     <div id="engine-osc" class="engine-controls hidden">
       <div class="field">
-        <label for="osc-type">Waveform</label>
-        <select id="osc-type">
-          <option value="triangle">triangle</option>
-          <option value="sine">sine</option>
-          <option value="sawtooth">sawtooth</option>
-          <option value="square">square</option>
-          <option value="noise">noise</option>
-        </select>
+        <label>Waveform</label>
+        <div id="osc-type" class="seg">
+          <input type="radio" id="wf-triangle" name="osc-type" value="triangle" checked><label for="wf-triangle">triangle</label>
+          <input type="radio" id="wf-sine" name="osc-type" value="sine"><label for="wf-sine">sine</label>
+          <input type="radio" id="wf-sawtooth" name="osc-type" value="sawtooth"><label for="wf-sawtooth">sawtooth</label>
+          <input type="radio" id="wf-square" name="osc-type" value="square"><label for="wf-square">square</label>
+          <input type="radio" id="wf-noise" name="osc-type" value="noise"><label for="wf-noise">noise</label>
+        </div>
       </div>
       <div class="engine-status">Pure synthesis with one voice per note. Noise is white noise looped, with playback rate mapped to MIDI pitch.</div>
+    </div>
+
+    <div id="engine-fm" class="engine-controls hidden">
+      <div class="field">
+        <label>Preset</label>
+        <div id="fm-preset" class="seg">
+          <input type="radio" id="fm-ep"      name="fm-preset" value="ep" checked><label for="fm-ep">EP</label>
+          <input type="radio" id="fm-bell"    name="fm-preset" value="bell"><label for="fm-bell">bell</label>
+          <input type="radio" id="fm-bass"    name="fm-preset" value="bass"><label for="fm-bass">bass</label>
+          <input type="radio" id="fm-brass"   name="fm-preset" value="brass"><label for="fm-brass">brass</label>
+          <input type="radio" id="fm-marimba" name="fm-preset" value="marimba"><label for="fm-marimba">marimba</label>
+          <input type="radio" id="fm-harp"    name="fm-preset" value="harp"><label for="fm-harp">harp</label>
+          <input type="radio" id="fm-strings" name="fm-preset" value="strings"><label for="fm-strings">strings</label>
+          <input type="radio" id="fm-whistle" name="fm-preset" value="whistle"><label for="fm-whistle">whistle</label>
+        </div>
+      </div>
+      <div class="engine-status">Six sine operators per voice, wired into one of four hand-picked DX-style algorithms (one per preset). Pitch bend and mod wheel apply to all six operators.</div>
     </div>
 
     <div id="engine-soundfont" class="engine-controls hidden">
@@ -155,7 +192,7 @@
   </div>
 
   <div class="panel">
-    <h2>Message log</h2>
+    <h2 class="with-action">Message log<a id="clear" class="link-action" href="#" aria-disabled="true">clear</a></h2>
     <div id="log"></div>
   </div>
 </main>
@@ -174,8 +211,12 @@
 
   const engineSelect = $('engine');
   const oscEngineEl = $('engine-osc');
+  const fmEngineEl = $('engine-fm');
   const sfEngineEl = $('engine-soundfont');
-  const oscTypeSelect = $('osc-type');
+  const oscTypeGroup = $('osc-type');
+  const getOscType = () => oscTypeGroup.querySelector('input[name="osc-type"]:checked')?.value || 'triangle';
+  const fmPresetGroup = $('fm-preset');
+  const getFmPreset = () => fmPresetGroup.querySelector('input[name="fm-preset"]:checked')?.value || 'ep';
   const sfInstrumentSelect = $('sf-instrument');
   const sfStatusEl = $('sf-status');
   const bendNeedle = $('bend-needle');
@@ -191,9 +232,12 @@
   // ---------- helpers ----------
 
   const setStatus = (msg, kind = '') => {
-    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+    statusEl.className = 'status-inline' + (kind ? ' ' + kind : '');
     statusEl.innerHTML = msg;
   };
+
+  const setLinkEnabled = (el, enabled) => el.setAttribute('aria-disabled', String(!enabled));
+  const isLinkEnabled = (el) => el.getAttribute('aria-disabled') !== 'true';
 
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -358,6 +402,283 @@
     }
   }
 
+  // ----- FM synth (6-op DX-style) -----
+  // Each voice spins up six sine operators. An "algorithm" describes which
+  // operators are carriers (heard) and which modulate which (audio-rate FM
+  // via Web Audio's AudioParam summation: connecting an oscillator's output
+  // into another oscillator's .frequency adds Hz of frequency offset).
+  // Per-connection scale gain converts the modulator's 0..level envelope
+  // into a peak Hz deviation of (level * fromFreq * BETA_MAX), so the
+  // modulation index β tracks pitch consistently across the keyboard.
+  // No feedback ops — DX7's classic bite, but skipped to avoid the
+  // DelayNode-around-feedback dance.
+
+  const FM_BETA_MAX = 6;
+  // Each op: { ratio, level, a, d, s, r }  (level 0..1, ADSR in seconds, s is fraction of level)
+  const FM_PRESETS = {
+    ep: {
+      // Three parallel pairs (DX7-ish algorithm 5): ops 1,3,5 carriers, 2→1, 4→3, 6→5.
+      // Op2 is the metallic tine ping (high ratio, fast decay), op6 a sub warmth.
+      algorithm: { mods: [[2,1],[4,3],[6,5]], carriers: [1,3,5] },
+      ops: [
+        { ratio: 1.0,   level: 0.7, a: 0.001, d: 1.5,  s: 0.0,  r: 0.4  },
+        { ratio: 14.0,  level: 0.6, a: 0.001, d: 0.18, s: 0.0,  r: 0.05 },
+        { ratio: 1.0,   level: 0.5, a: 0.002, d: 0.6,  s: 0.6,  r: 0.3  },
+        { ratio: 1.005, level: 0.3, a: 0.002, d: 0.4,  s: 0.3,  r: 0.2  },
+        { ratio: 1.0,   level: 0.8, a: 0.005, d: 2.0,  s: 0.7,  r: 0.5  },
+        { ratio: 0.5,   level: 0.4, a: 0.005, d: 1.5,  s: 0.5,  r: 0.4  }
+      ]
+    },
+    bell: {
+      // Single carrier with five modulators in parallel (DX7-ish algorithm 22).
+      // Inharmonic ratios + slow carrier release = struck-bell decay.
+      algorithm: { mods: [[2,1],[3,1],[4,1],[5,1],[6,1]], carriers: [1] },
+      ops: [
+        { ratio: 1.0,   level: 0.9, a: 0.001, d: 4.0, s: 0.0, r: 3.0 },
+        { ratio: 3.5,   level: 0.6, a: 0.001, d: 1.5, s: 0.0, r: 1.0 },
+        { ratio: 7.06,  level: 0.4, a: 0.001, d: 0.8, s: 0.0, r: 0.5 },
+        { ratio: 11.0,  level: 0.3, a: 0.001, d: 0.4, s: 0.0, r: 0.3 },
+        { ratio: 14.5,  level: 0.2, a: 0.001, d: 0.3, s: 0.0, r: 0.2 },
+        { ratio: 0.503, level: 0.5, a: 0.001, d: 3.0, s: 0.3, r: 2.0 }
+      ]
+    },
+    bass: {
+      // Three-deep mod stack into op1 (3→2→1) for harshness, plus a sub-octave
+      // carrier (op4 ratio 0.5) and a brighter pair (6→5) layered in.
+      algorithm: { mods: [[3,2],[2,1],[6,5]], carriers: [1,4,5] },
+      ops: [
+        { ratio: 1.0, level: 1.0, a: 0.001, d: 0.5,  s: 0.7, r: 0.15 },
+        { ratio: 1.0, level: 0.6, a: 0.001, d: 0.2,  s: 0.4, r: 0.1  },
+        { ratio: 4.0, level: 0.4, a: 0.001, d: 0.1,  s: 0.0, r: 0.05 },
+        { ratio: 0.5, level: 0.5, a: 0.005, d: 0.6,  s: 0.7, r: 0.2  },
+        { ratio: 2.0, level: 0.4, a: 0.001, d: 0.3,  s: 0.5, r: 0.15 },
+        { ratio: 3.0, level: 0.3, a: 0.001, d: 0.15, s: 0.0, r: 0.05 }
+      ]
+    },
+    brass: {
+      // Same algorithm as EP but with slow attacks and high sustain — the
+      // attack-controlled brightness is the DX brass signature.
+      algorithm: { mods: [[2,1],[4,3],[6,5]], carriers: [1,3,5] },
+      ops: [
+        { ratio: 1.0, level: 0.9, a: 0.06, d: 0.2, s: 0.85, r: 0.3 },
+        { ratio: 1.0, level: 0.6, a: 0.09, d: 0.3, s: 0.6,  r: 0.3 },
+        { ratio: 1.0, level: 0.7, a: 0.07, d: 0.2, s: 0.85, r: 0.3 },
+        { ratio: 2.0, level: 0.5, a: 0.09, d: 0.3, s: 0.6,  r: 0.3 },
+        { ratio: 1.0, level: 0.5, a: 0.10, d: 0.4, s: 0.85, r: 0.4 },
+        { ratio: 0.5, level: 0.4, a: 0.10, d: 0.3, s: 0.7,  r: 0.4 }
+      ]
+    },
+    marimba: {
+      // DX7 "MARIMBA" — classic woody percussive. Three parallel layers:
+      // op1+op2 main mallet pitch with mod index decaying away fast (bright
+      // strike collapsing to pure tone), op3+op4 a high-formant mallet click,
+      // op5 a sub-octave body. No sustain on any op — pure decay.
+      algorithm: { mods: [[2,1],[4,3]], carriers: [1,3,5] },
+      ops: [
+        { ratio: 1.0, level: 0.9, a: 0.001, d: 0.45, s: 0.0, r: 0.2  },
+        { ratio: 1.0, level: 0.7, a: 0.001, d: 0.05, s: 0.0, r: 0.05 },
+        { ratio: 4.0, level: 0.4, a: 0.001, d: 0.10, s: 0.0, r: 0.05 },
+        { ratio: 1.0, level: 0.3, a: 0.001, d: 0.03, s: 0.0, r: 0.03 },
+        { ratio: 0.5, level: 0.3, a: 0.001, d: 0.7,  s: 0.0, r: 0.3  },
+        { ratio: 1.0, level: 0.0, a: 0.001, d: 0.05, s: 0.0, r: 0.05 }
+      ]
+    },
+    harp: {
+      // DX7 "HARP 1" / plucked string — quick attack, slow harmonic decay,
+      // no sustain. Modulators decay faster than carriers so the timbre
+      // brightens at the pluck and mellows as it rings out.
+      algorithm: { mods: [[2,1],[4,3],[6,5]], carriers: [1,3,5] },
+      ops: [
+        { ratio: 1.0,   level: 0.9, a: 0.002, d: 1.8, s: 0.0, r: 0.6 },
+        { ratio: 3.0,   level: 0.5, a: 0.002, d: 0.3, s: 0.0, r: 0.1 },
+        { ratio: 2.0,   level: 0.4, a: 0.002, d: 1.2, s: 0.0, r: 0.4 },
+        { ratio: 5.0,   level: 0.3, a: 0.002, d: 0.2, s: 0.0, r: 0.1 },
+        { ratio: 4.0,   level: 0.3, a: 0.002, d: 0.8, s: 0.0, r: 0.3 },
+        { ratio: 1.005, level: 0.2, a: 0.002, d: 0.3, s: 0.0, r: 0.1 }
+      ]
+    },
+    strings: {
+      // DX7 "STRINGS 1" — slow swell pad. Four carriers piled up with
+      // sub-cent detuning between them produces the classic chorused FM
+      // strings sheen; two soft modulators add gentle harmonic motion.
+      algorithm: { mods: [[2,1],[4,3]], carriers: [1,3,5,6] },
+      ops: [
+        { ratio: 1.0,   level: 0.7, a: 0.3, d: 0.2, s: 0.9,  r: 0.6 },
+        { ratio: 1.005, level: 0.4, a: 0.3, d: 0.3, s: 0.7,  r: 0.5 },
+        { ratio: 2.0,   level: 0.5, a: 0.3, d: 0.2, s: 0.85, r: 0.5 },
+        { ratio: 2.005, level: 0.3, a: 0.3, d: 0.3, s: 0.7,  r: 0.5 },
+        { ratio: 0.5,   level: 0.5, a: 0.3, d: 0.2, s: 0.9,  r: 0.6 },
+        { ratio: 0.503, level: 0.4, a: 0.3, d: 0.2, s: 0.85, r: 0.6 }
+      ]
+    },
+    whistle: {
+      // DX7 "WHISTLE" — single sustained sine with a touch of 2nd-harmonic
+      // mod for body and a sub-cent detuned twin for a slow chorus-y wobble.
+      // Most ops idle at level 0; FM is at its purest with a tiny operator
+      // count.
+      algorithm: { mods: [[2,1]], carriers: [1,3] },
+      ops: [
+        { ratio: 1.0,   level: 0.85, a: 0.04, d: 0.10, s: 0.95, r: 0.15 },
+        { ratio: 2.0,   level: 0.18, a: 0.04, d: 0.10, s: 0.5,  r: 0.10 },
+        { ratio: 1.005, level: 0.18, a: 0.05, d: 0.10, s: 0.8,  r: 0.15 },
+        { ratio: 1.0,   level: 0.0,  a: 0.01, d: 0.05, s: 0.0,  r: 0.05 },
+        { ratio: 1.0,   level: 0.0,  a: 0.01, d: 0.05, s: 0.0,  r: 0.05 },
+        { ratio: 1.0,   level: 0.0,  a: 0.01, d: 0.05, s: 0.0,  r: 0.05 }
+      ]
+    }
+  };
+
+  class FMEngine {
+    constructor(ctx, presetKey = 'ep') {
+      this.ctx = ctx;
+      this.master = ctx.createGain();
+      this.master.gain.value = 0.18;
+      this.comp = ctx.createDynamicsCompressor();
+      this.master.connect(this.comp);
+      this.comp.connect(ctx.destination);
+      this.voices = new Map();
+      this.bendCents = new Map();
+      this.modAmount = new Map();
+      this.preset = FM_PRESETS[presetKey] || FM_PRESETS.ep;
+      // Modulator role lookup, recomputed when preset changes
+      this._refreshRoles();
+    }
+    _refreshRoles() {
+      this.modulatorOps = new Set();
+      for (const [from] of this.preset.algorithm.mods) this.modulatorOps.add(from);
+    }
+    setPreset(key) {
+      if (FM_PRESETS[key]) {
+        this.preset = FM_PRESETS[key];
+        this._refreshRoles();
+        // Existing voices keep their previous patch — change applies to next noteOn.
+      }
+    }
+    noteOn(ch, n, v) {
+      this.noteOff(ch, n);
+      const t = this.ctx.currentTime;
+      const baseFreq = 440 * Math.pow(2, (n - 69) / 12);
+      const velScale = v / 127;
+      const bendCents = this.bendCents.get(ch) || 0;
+      const vibratoDepth = (this.modAmount.get(ch) || 0) * VIBRATO_MAX_CENTS;
+      const { algorithm, ops: specs } = this.preset;
+
+      const ops = [];
+      for (let i = 0; i < 6; i++) {
+        const spec = specs[i];
+        const opFreq = baseFreq * spec.ratio;
+        const osc = this.ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = opFreq;
+        osc.detune.value = bendCents;
+        const envGain = this.ctx.createGain();
+        envGain.gain.value = 0;
+        osc.connect(envGain);
+        ops.push({ osc, envGain, spec, freq: opFreq });
+      }
+
+      // Vibrato LFO into all ops' detune.
+      const vibOsc = this.ctx.createOscillator();
+      vibOsc.type = 'sine';
+      vibOsc.frequency.value = VIBRATO_HZ;
+      const vibGain = this.ctx.createGain();
+      vibGain.gain.value = vibratoDepth;
+      vibOsc.connect(vibGain);
+      for (const op of ops) vibGain.connect(op.osc.detune);
+
+      // Modulator wiring — per-connection scale gain converts envelope (0..level)
+      // into Hz frequency deviation, with mod index β = level * BETA_MAX.
+      const scaleGains = [];
+      for (const [from, to] of algorithm.mods) {
+        const fromOp = ops[from - 1];
+        const toOp = ops[to - 1];
+        const scale = this.ctx.createGain();
+        scale.gain.value = fromOp.freq * FM_BETA_MAX;
+        fromOp.envGain.connect(scale);
+        scale.connect(toOp.osc.frequency);
+        scaleGains.push(scale);
+      }
+
+      // Carrier sum — velocity scales the audible output, not modulator depth,
+      // so harder-played notes are louder but not (much) brighter. (Authentic
+      // DX7 also brightens; we'd need per-op velocity scaling to match.)
+      const carrierGain = this.ctx.createGain();
+      carrierGain.gain.value = velScale * 0.45;
+      for (const c of algorithm.carriers) ops[c - 1].envGain.connect(carrierGain);
+      carrierGain.connect(this.master);
+
+      // Trigger envelopes (attack -> decay to sustain). Release happens on noteOff.
+      // Peak/sustain are clamped to a tiny non-zero value so a level: 0 op (used
+      // to silence unused operators in some patches like "whistle") doesn't
+      // trip exponentialRampToValueAtTime, which is undefined when starting or
+      // ending at exactly zero.
+      for (const op of ops) {
+        const { spec, envGain } = op;
+        const peak = Math.max(spec.level, 0.0001);
+        const sustain = Math.max(peak * spec.s, 0.0001);
+        envGain.gain.cancelScheduledValues(t);
+        envGain.gain.setValueAtTime(0.0001, t);
+        envGain.gain.linearRampToValueAtTime(peak, t + spec.a);
+        envGain.gain.exponentialRampToValueAtTime(sustain, t + spec.a + spec.d);
+      }
+
+      for (const op of ops) op.osc.start(t);
+      vibOsc.start(t);
+
+      this.voices.set(`${ch}-${n}`, { ops, scaleGains, carrierGain, vibOsc, vibGain });
+    }
+    noteOff(ch, n) {
+      const k = `${ch}-${n}`;
+      const voice = this.voices.get(k);
+      if (!voice) return;
+      const t = this.ctx.currentTime;
+      let maxRelease = 0;
+      for (const op of voice.ops) {
+        const r = op.spec.r;
+        if (r > maxRelease) maxRelease = r;
+        op.envGain.gain.cancelScheduledValues(t);
+        op.envGain.gain.setValueAtTime(op.envGain.gain.value, t);
+        op.envGain.gain.exponentialRampToValueAtTime(0.0001, t + r);
+      }
+      const stopAt = t + maxRelease + 0.05;
+      for (const op of voice.ops) { try { op.osc.stop(stopAt); } catch (_) {} }
+      try { voice.vibOsc.stop(stopAt); } catch (_) {}
+      this.voices.delete(k);
+    }
+    pitchBend(ch, value) {
+      const cents = (value / 8192) * BEND_RANGE_SEMITONES * 100;
+      this.bendCents.set(ch, cents);
+      const t = this.ctx.currentTime;
+      for (const [k, voice] of this.voices) {
+        if (Number(k.split('-')[0]) !== ch) continue;
+        for (const op of voice.ops) op.osc.detune.setTargetAtTime(cents, t, 0.005);
+      }
+    }
+    modWheel(ch, value) {
+      const amt = value / 127;
+      this.modAmount.set(ch, amt);
+      const target = amt * VIBRATO_MAX_CENTS;
+      const t = this.ctx.currentTime;
+      for (const [k, voice] of this.voices) {
+        if (Number(k.split('-')[0]) !== ch) continue;
+        voice.vibGain.gain.setTargetAtTime(target, t, 0.02);
+      }
+    }
+    panic() {
+      for (const k of [...this.voices.keys()]) {
+        const [ch, n] = k.split('-').map(Number);
+        this.noteOff(ch, n);
+      }
+    }
+    destroy() {
+      this.panic();
+      setTimeout(() => {
+        try { this.master.disconnect(); } catch (_) {}
+        try { this.comp.disconnect(); } catch (_) {}
+      }, 3000); // longer than longest release (bell ~3s)
+    }
+  }
+
   // Sample-based GM synth via soundfont-player.
   // Pitch bend support is best-effort: we reach into the returned voice
   // object for an AudioBufferSourceNode-shaped detune AudioParam. The
@@ -514,11 +835,15 @@
   const swapEngine = async (kind) => {
     if (engine) { try { engine.destroy(); } catch (_) {} engine = null; }
     oscEngineEl.classList.add('hidden');
+    fmEngineEl.classList.add('hidden');
     sfEngineEl.classList.add('hidden');
 
     if (kind === 'osc') {
       oscEngineEl.classList.remove('hidden');
-      engine = new OscEngine(ensureAudioCtx(), oscTypeSelect.value);
+      engine = new OscEngine(ensureAudioCtx(), getOscType());
+    } else if (kind === 'fm') {
+      fmEngineEl.classList.remove('hidden');
+      engine = new FMEngine(ensureAudioCtx(), getFmPreset());
     } else if (kind === 'soundfont') {
       sfEngineEl.classList.remove('hidden');
       if (typeof Soundfont === 'undefined') {
@@ -597,14 +922,19 @@
   // ---------- event handlers ----------
 
   engineSelect.addEventListener('change', () => swapEngine(engineSelect.value));
-  oscTypeSelect.addEventListener('change', () => {
-    if (engine instanceof OscEngine) engine.setType(oscTypeSelect.value);
+  oscTypeGroup.addEventListener('change', () => {
+    if (engine instanceof OscEngine) engine.setType(getOscType());
+  });
+  fmPresetGroup.addEventListener('change', () => {
+    if (engine instanceof FMEngine) engine.setPreset(getFmPreset());
   });
   sfInstrumentSelect.addEventListener('change', () => {
     if (engine instanceof SoundfontEngine) engine.load(sfInstrumentSelect.value);
   });
 
-  panicBtn.addEventListener('click', () => {
+  panicBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!isLinkEnabled(panicBtn)) return;
     if (engine) engine.panic?.();
     sustainHeld.clear();
     sustainPending.clear();
@@ -614,7 +944,11 @@
     modFill.style.width = '0%';
     modValueEl.textContent = '0';
   });
-  clearBtn.addEventListener('click', () => { logEl.innerHTML = ''; });
+  clearBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!isLinkEnabled(clearBtn)) return;
+    logEl.innerHTML = '';
+  });
 
   requestBtn.addEventListener('click', async () => {
     if (!navigator.requestMIDIAccess) {
@@ -634,8 +968,8 @@
         logSystem(`${p.type} "${p.name}" ${p.state}/${p.connection}`);
         refreshAll();
       };
-      clearBtn.disabled = false;
-      panicBtn.disabled = false;
+      setLinkEnabled(clearBtn, true);
+      setLinkEnabled(panicBtn, true);
       swapEngine(engineSelect.value);
     } catch (err) {
       setStatus(`MIDI access failed: ${escapeHtml(err.message || String(err))}`, 'error');
