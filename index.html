@@ -62,6 +62,22 @@
   .engine-controls.hidden { display: none; }
   .engine-status { font-size: 12px; color: var(--muted); margin-top: 6px; }
   .engine-status.warn { color: var(--warn); }
+  .controllers { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; font-size: 12px;
+    color: var(--muted); }
+  .ctl-item { display: flex; gap: 8px; align-items: center; }
+  .ctl-item .v { color: var(--text); font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+  .bend-track { width: 160px; height: 8px; background: rgba(255,255,255,0.06); border-radius: 4px;
+    position: relative; overflow: hidden; }
+  .bend-track::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+    background: rgba(255,255,255,0.18); }
+  .bend-needle { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--note);
+    left: calc(50% - 1.5px); transition: left 60ms linear; }
+  .mod-track { width: 110px; height: 8px; background: rgba(255,255,255,0.06); border-radius: 4px;
+    overflow: hidden; }
+  .mod-fill { height: 100%; width: 0%; background: var(--accent); transition: width 60ms linear; }
+  .led { width: 10px; height: 10px; border-radius: 50%; background: rgba(255,255,255,0.08);
+    border: 1px solid var(--border); display: inline-block; }
+  .led.on { background: var(--warn); border-color: var(--warn); box-shadow: 0 0 8px rgba(251,191,36,0.6); }
 </style>
 </head>
 <body>
@@ -112,6 +128,21 @@
     </div>
   </div>
 
+  <div class="panel">
+    <h2>Controllers <span class="hint">live state of universal-MIDI controls (channel-aware)</span></h2>
+    <div class="controllers">
+      <div class="ctl-item">pitch&nbsp;bend
+        <div class="bend-track"><div id="bend-needle" class="bend-needle"></div></div>
+        <span id="bend-value" class="v">0</span>
+      </div>
+      <div class="ctl-item">mod&nbsp;wheel
+        <div class="mod-track"><div id="mod-fill" class="mod-fill"></div></div>
+        <span id="mod-value" class="v">0</span>
+      </div>
+      <div class="ctl-item"><span id="sustain-led" class="led"></span>sustain&nbsp;pedal</div>
+    </div>
+  </div>
+
   <div class="row">
     <div class="panel">
       <h2>Inputs</h2>
@@ -147,6 +178,11 @@
   const oscTypeSelect = $('osc-type');
   const sfInstrumentSelect = $('sf-instrument');
   const sfStatusEl = $('sf-status');
+  const bendNeedle = $('bend-needle');
+  const bendValueEl = $('bend-value');
+  const modFill = $('mod-fill');
+  const modValueEl = $('mod-value');
+  const sustainLed = $('sustain-led');
 
   let access = null;
   let audioCtx = null;
@@ -212,6 +248,9 @@
   // harmonic-rich waves, so it gets a big boost. A DynamicsCompressor on the
   // master tames the resulting peaks when several voices stack.
   const OSC_TYPE_GAIN = { sine: 4.0, triangle: 1.6, sawtooth: 0.55, square: 0.45, noise: 0.5 };
+  const VIBRATO_HZ = 5;            // typical mod-wheel vibrato rate
+  const VIBRATO_MAX_CENTS = 50;    // max depth at full mod
+  const BEND_RANGE_SEMITONES = 2;  // standard MIDI default
   class OscEngine {
     constructor(ctx, type = 'triangle') {
       this.ctx = ctx;
@@ -223,6 +262,8 @@
       this.comp.connect(ctx.destination);
       this.voices = new Map();
       this.noiseBuffer = null;
+      this.bendCents = new Map(); // ch -> cents
+      this.modAmount = new Map(); // ch -> 0..1
     }
     setType(t) { this.type = t; }
     ensureNoiseBuffer() {
@@ -247,6 +288,17 @@
         src.type = this.type;
         src.frequency.value = 440 * Math.pow(2, (n - 69) / 12);
       }
+      src.detune.value = this.bendCents.get(ch) || 0;
+
+      // Vibrato LFO -> voice.detune (depth scaled by mod wheel)
+      const vibOsc = this.ctx.createOscillator();
+      vibOsc.type = 'sine';
+      vibOsc.frequency.value = VIBRATO_HZ;
+      const vibGain = this.ctx.createGain();
+      vibGain.gain.value = (this.modAmount.get(ch) || 0) * VIBRATO_MAX_CENTS;
+      vibOsc.connect(vibGain);
+      vibGain.connect(src.detune);
+
       const g = this.ctx.createGain();
       g.gain.value = 0;
       src.connect(g); g.connect(this.master);
@@ -255,7 +307,8 @@
       const peak = (v / 127) * 0.6 * typeGain;
       g.gain.linearRampToValueAtTime(peak, t + 0.01);
       src.start();
-      this.voices.set(`${ch}-${n}`, { osc: src, g });
+      vibOsc.start();
+      this.voices.set(`${ch}-${n}`, { osc: src, g, vibOsc, vibGain });
     }
     noteOff(ch, n) {
       const k = `${ch}-${n}`;
@@ -266,7 +319,29 @@
       v.g.gain.setValueAtTime(v.g.gain.value, t);
       v.g.gain.linearRampToValueAtTime(0.0001, t + 0.12);
       v.osc.stop(t + 0.14);
+      try { v.vibOsc.stop(t + 0.14); } catch (_) {}
       this.voices.delete(k);
+    }
+    pitchBend(ch, value) {
+      const cents = (value / 8192) * BEND_RANGE_SEMITONES * 100;
+      this.bendCents.set(ch, cents);
+      const t = this.ctx.currentTime;
+      for (const [k, v] of this.voices) {
+        if (Number(k.split('-')[0]) === ch) {
+          v.osc.detune.setTargetAtTime(cents, t, 0.005);
+        }
+      }
+    }
+    modWheel(ch, value) {
+      const amt = value / 127;
+      this.modAmount.set(ch, amt);
+      const target = amt * VIBRATO_MAX_CENTS;
+      const t = this.ctx.currentTime;
+      for (const [k, v] of this.voices) {
+        if (Number(k.split('-')[0]) === ch && v.vibGain) {
+          v.vibGain.gain.setTargetAtTime(target, t, 0.02);
+        }
+      }
     }
     panic() {
       for (const k of [...this.voices.keys()]) {
@@ -284,6 +359,18 @@
   }
 
   // Sample-based GM synth via soundfont-player.
+  // Pitch bend support is best-effort: we reach into the returned voice
+  // object for an AudioBufferSourceNode-shaped detune AudioParam. The
+  // library doesn't formally expose this, so it may stop working if the
+  // shape changes — failures are silent.
+  const findDetune = (node) => {
+    for (const candidate of [node, node?.source, node?._source, node?.audioNode, node?.node]) {
+      if (candidate && candidate.detune && typeof candidate.detune.setTargetAtTime === 'function') {
+        return candidate.detune;
+      }
+    }
+    return null;
+  };
   class SoundfontEngine {
     constructor(ctx) {
       this.ctx = ctx;
@@ -294,6 +381,7 @@
       this.instName = null;
       this.voices = new Map();
       this.loadToken = 0;
+      this.bendCents = new Map(); // ch -> cents
     }
     async load(name) {
       const token = ++this.loadToken;
@@ -315,6 +403,11 @@
       if (!this.inst) return;
       this.noteOff(ch, n);
       const node = this.inst.play(n, this.ctx.currentTime, { gain: (v / 127) * 1.5 });
+      const cents = this.bendCents.get(ch) || 0;
+      if (cents) {
+        const detune = findDetune(node);
+        if (detune) { try { detune.value = cents; } catch (_) {} }
+      }
       this.voices.set(`${ch}-${n}`, node);
     }
     noteOff(ch, n) {
@@ -323,6 +416,17 @@
       if (node) {
         try { node.stop(this.ctx.currentTime); } catch (_) {}
         this.voices.delete(k);
+      }
+    }
+    pitchBend(ch, value) {
+      const cents = (value / 8192) * BEND_RANGE_SEMITONES * 100;
+      this.bendCents.set(ch, cents);
+      const t = this.ctx.currentTime;
+      for (const [k, node] of this.voices) {
+        if (Number(k.split('-')[0]) === ch) {
+          const detune = findDetune(node);
+          if (detune) { try { detune.setTargetAtTime(cents, t, 0.005); } catch (_) {} }
+        }
       }
     }
     panic() {
@@ -336,17 +440,67 @@
   }
 
   // ---------- dispatcher ----------
+  // Sits between Web MIDI input and the engine. Implements universal-MIDI
+  // controls (sustain pedal, mod wheel, pitch bend) so they Just Work no
+  // matter which engine is selected.
+
+  const sustainHeld = new Map();      // ch -> bool
+  const sustainPending = new Map();   // ch -> Set<note>
+
+  const setBendDisplay = (ch, value) => {
+    const pct = Math.max(-1, Math.min(1, value / 8192)); // -1..+1
+    bendNeedle.style.left = `calc(${50 + pct * 50}% - 1.5px)`;
+    bendValueEl.textContent = `ch${ch} ${value}`;
+  };
+  const setModDisplay = (ch, value) => {
+    modFill.style.width = `${(value / 127) * 100}%`;
+    modValueEl.textContent = `ch${ch} ${value}`;
+  };
+  const setSustainDisplay = (ch, held) => {
+    sustainLed.classList.toggle('on', held);
+  };
 
   const dispatch = (data) => {
-    if (!engine) return;
     const [s, d1, d2 = 0] = data;
     const type = s & 0xf0;
     const ch = (s & 0x0f) + 1;
-    if (type === 0x90 && d2 > 0) engine.noteOn?.(ch, d1, d2);
-    else if (type === 0x80 || (type === 0x90 && d2 === 0)) engine.noteOff?.(ch, d1);
-    else if (type === 0xb0) engine.cc?.(ch, d1, d2);
-    else if (type === 0xc0) engine.pc?.(ch, d1);
-    else if (type === 0xe0) engine.pitch?.(ch, d1, d2);
+
+    if (type === 0x90 && d2 > 0) {
+      sustainPending.get(ch)?.delete(d1);
+      engine?.noteOn?.(ch, d1, d2);
+    } else if (type === 0x80 || (type === 0x90 && d2 === 0)) {
+      if (sustainHeld.get(ch)) {
+        let pend = sustainPending.get(ch);
+        if (!pend) { pend = new Set(); sustainPending.set(ch, pend); }
+        pend.add(d1);
+      } else {
+        engine?.noteOff?.(ch, d1);
+      }
+    } else if (type === 0xb0) {
+      if (d1 === 64) {
+        const held = d2 >= 64;
+        sustainHeld.set(ch, held);
+        setSustainDisplay(ch, held);
+        if (!held) {
+          const pend = sustainPending.get(ch);
+          if (pend) {
+            for (const n of pend) engine?.noteOff?.(ch, n);
+            pend.clear();
+          }
+        }
+      } else if (d1 === 1) {
+        engine?.modWheel?.(ch, d2);
+        setModDisplay(ch, d2);
+      } else {
+        engine?.cc?.(ch, d1, d2);
+      }
+    } else if (type === 0xc0) {
+      engine?.pc?.(ch, d1);
+    } else if (type === 0xe0) {
+      const value = ((d2 << 7) | d1) - 8192;
+      engine?.pitchBend?.(ch, value);
+      setBendDisplay(ch, value);
+    }
   };
 
   // ---------- engine wiring ----------
@@ -450,7 +604,16 @@
     if (engine instanceof SoundfontEngine) engine.load(sfInstrumentSelect.value);
   });
 
-  panicBtn.addEventListener('click', () => { if (engine) engine.panic?.(); });
+  panicBtn.addEventListener('click', () => {
+    if (engine) engine.panic?.();
+    sustainHeld.clear();
+    sustainPending.clear();
+    sustainLed.classList.remove('on');
+    bendNeedle.style.left = 'calc(50% - 1.5px)';
+    bendValueEl.textContent = '0';
+    modFill.style.width = '0%';
+    modValueEl.textContent = '0';
+  });
   clearBtn.addEventListener('click', () => { logEl.innerHTML = ''; });
 
   requestBtn.addEventListener('click', async () => {
