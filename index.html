@@ -69,6 +69,8 @@
   .field label { font-size: 12px; color: var(--muted); }
   select { background: #0a0c12; color: var(--text); border: 1px solid var(--border);
     border-radius: 4px; padding: 6px 8px; font: inherit; min-width: 240px; }
+  input[type="range"] { width: 320px; max-width: 100%; accent-color: var(--accent); }
+  .v-label { color: var(--text); font-variant-numeric: tabular-nums; margin-left: 8px; }
   .engine-controls { padding-top: 8px; border-top: 1px dashed var(--border); margin-top: 8px; }
   .engine-controls.hidden { display: none; }
   .engine-status { font-size: 12px; color: var(--muted); margin-top: 6px; }
@@ -121,6 +123,7 @@
         <option value="none">None (log only)</option>
         <option value="osc">PSG Synth</option>
         <option value="fm">FM synth</option>
+        <option value="wavetable">Wavetable synth</option>
         <option value="soundfont" selected>Soundfont sampler</option>
       </select>
     </div>
@@ -130,10 +133,12 @@
         <label>Waveform</label>
         <div id="osc-type" class="seg">
           <input type="radio" id="wf-triangle" name="osc-type" value="triangle" checked><label for="wf-triangle">triangle</label>
-          <input type="radio" id="wf-sine" name="osc-type" value="sine"><label for="wf-sine">sine</label>
+          <input type="radio" id="wf-sine"     name="osc-type" value="sine"><label for="wf-sine">sine</label>
           <input type="radio" id="wf-sawtooth" name="osc-type" value="sawtooth"><label for="wf-sawtooth">sawtooth</label>
-          <input type="radio" id="wf-square" name="osc-type" value="square"><label for="wf-square">square</label>
-          <input type="radio" id="wf-noise" name="osc-type" value="noise"><label for="wf-noise">noise</label>
+          <input type="radio" id="wf-square"   name="osc-type" value="square"><label for="wf-square">square</label>
+          <input type="radio" id="wf-pulse25"  name="osc-type" value="pulse25"><label for="wf-pulse25">pulse 25</label>
+          <input type="radio" id="wf-pulse125" name="osc-type" value="pulse125"><label for="wf-pulse125">pulse 12.5</label>
+          <input type="radio" id="wf-noise"    name="osc-type" value="noise"><label for="wf-noise">noise</label>
         </div>
       </div>
       <div class="engine-status">Pure synthesis with one voice per note. Noise is white noise looped, with playback rate mapped to MIDI pitch.</div>
@@ -158,6 +163,14 @@
         </div>
       </div>
       <div class="engine-status">Six sine operators per voice, wired into one of four hand-picked DX-style algorithms (one per preset). Pitch bend and mod wheel apply to all six operators.</div>
+    </div>
+
+    <div id="engine-wt" class="engine-controls hidden">
+      <div class="field">
+        <label for="wt-position">Position <span id="wt-position-label" class="v-label">0.00 — sine → triangle</span></label>
+        <input id="wt-position" type="range" min="0" max="7" step="0.01" value="0">
+      </div>
+      <div class="engine-status">Eight waveforms in a small bank (sine → triangle → square → sawtooth → pulses → harmonics-rich → spike). Slider crossfades between adjacent positions; while a note is held it morphs within the locked pair, and new notes lock to the current position.</div>
     </div>
 
     <div id="engine-soundfont" class="engine-controls hidden">
@@ -216,11 +229,14 @@
   const engineSelect = $('engine');
   const oscEngineEl = $('engine-osc');
   const fmEngineEl = $('engine-fm');
+  const wtEngineEl = $('engine-wt');
   const sfEngineEl = $('engine-soundfont');
   const oscTypeGroup = $('osc-type');
   const getOscType = () => oscTypeGroup.querySelector('input[name="osc-type"]:checked')?.value || 'triangle';
   const fmPresetGroup = $('fm-preset');
   const getFmPreset = () => fmPresetGroup.querySelector('input[name="fm-preset"]:checked')?.value || 'ep';
+  const wtPositionInput = $('wt-position');
+  const wtPositionLabel = $('wt-position-label');
   const sfInstrumentSelect = $('sf-instrument');
   const sfStatusEl = $('sf-status');
   const bendNeedle = $('bend-needle');
@@ -290,12 +306,31 @@
   // ---------- engines ----------
 
   // Pure Web Audio oscillator-per-voice synth, with a noise voice backed by
-  // a looped white-noise buffer. Per-waveform gain compensation tries to land
-  // each waveform at roughly equal perceived loudness — sine has all its
-  // energy at the fundamental and is hugely under-loud relative to the
-  // harmonic-rich waves, so it gets a big boost. A DynamicsCompressor on the
-  // master tames the resulting peaks when several voices stack.
-  const OSC_TYPE_GAIN = { sine: 4.0, triangle: 1.6, sawtooth: 0.55, square: 0.45, noise: 0.5 };
+  // a looped white-noise buffer and pulse voices backed by precomputed
+  // PeriodicWaves. Per-waveform gain compensation tries to land each
+  // waveform at roughly equal perceived loudness — sine has all its energy
+  // at the fundamental and is hugely under-loud relative to harmonic-rich
+  // waves, so it gets a big boost. A DynamicsCompressor on the master tames
+  // peaks when several voices stack.
+  const OSC_TYPE_GAIN = {
+    sine: 4.0, triangle: 1.6, sawtooth: 0.55, square: 0.45,
+    pulse25: 0.5, pulse125: 0.55, noise: 0.5
+  };
+
+  // Build a pulse wave at the given duty cycle from its Fourier coefficients.
+  // For a pulse, the nth harmonic amplitude is (2/πn) * sin(πn * duty). We
+  // place the energy in the imaginary (sine) channel for phase-consistency
+  // with the other PSG/wavetable shapes — the time-domain waveform isn't a
+  // textbook flat-topped pulse, but the magnitude spectrum is identical and
+  // the human ear hears spectrum, not absolute phase.
+  const makePulseWave = (ctx, duty, harmonics = 64) => {
+    const real = new Float32Array(harmonics + 1);
+    const imag = new Float32Array(harmonics + 1);
+    for (let n = 1; n <= harmonics; n++) {
+      imag[n] = (2 / (Math.PI * n)) * Math.sin(Math.PI * n * duty);
+    }
+    return ctx.createPeriodicWave(real, imag);
+  };
   const VIBRATO_HZ = 5;            // typical mod-wheel vibrato rate
   const VIBRATO_MAX_CENTS = 50;    // max depth at full mod
   const BEND_RANGE_SEMITONES = 2;  // standard MIDI default
@@ -310,6 +345,10 @@
       this.comp.connect(ctx.destination);
       this.voices = new Map();
       this.noiseBuffer = null;
+      this.pulseWaves = {
+        pulse25:  makePulseWave(ctx, 0.25),
+        pulse125: makePulseWave(ctx, 0.125)
+      };
       this.bendCents = new Map(); // ch -> cents
       this.modAmount = new Map(); // ch -> 0..1
     }
@@ -331,6 +370,10 @@
         src.buffer = this.ensureNoiseBuffer();
         src.loop = true;
         src.playbackRate.value = Math.pow(2, (n - 69) / 12);
+      } else if (this.pulseWaves[this.type]) {
+        src = this.ctx.createOscillator();
+        src.setPeriodicWave(this.pulseWaves[this.type]);
+        src.frequency.value = 440 * Math.pow(2, (n - 69) / 12);
       } else {
         src = this.ctx.createOscillator();
         src.type = this.type;
@@ -742,6 +785,164 @@
     }
   }
 
+  // ----- Wavetable synth -----
+  // A small bank of waveforms stored as PeriodicWaves. Each voice spawns two
+  // oscillators set to the table positions floor(pos) and ceil(pos), summed
+  // through a pair of crossfade gains driven by the fractional part. While a
+  // note is held, moving the position slider morphs *within* the locked pair
+  // (both gains are AudioParams and ramp smoothly); positions outside that
+  // pair clamp to the nearest edge until the next noteOn relocks. Skips the
+  // mid-note oscillator-swap dance — it's fragile in Web Audio.
+
+  const WT_BANK = [
+    { name: 'sine',        h: (n) => n === 1 ? 1 : 0 },
+    { name: 'triangle',    h: (n) => (n % 2 === 1) ? Math.pow(-1, (n - 1) / 2) / (n * n) : 0 },
+    { name: 'square',      h: (n) => (n % 2 === 1) ? 1 / n : 0 },
+    { name: 'sawtooth',    h: (n) => 1 / n },
+    { name: 'pulse 25',    h: (n) => Math.sin(Math.PI * n * 0.25)  / n },
+    { name: 'pulse 12.5',  h: (n) => Math.sin(Math.PI * n * 0.125) / n },
+    { name: 'rich',        h: (n) => n <= 8 ? 1 : 0 }, // first 8 harmonics flat — buzzy organ-ish
+    { name: 'spike',       h: (n) => 1 / Math.sqrt(n) } // slow rolloff = harmonics-rich, sinc-like
+  ];
+  const WT_HARMONICS = 32;
+
+  const makeBankWave = (ctx, harmonicFn) => {
+    const real = new Float32Array(WT_HARMONICS + 1);
+    const imag = new Float32Array(WT_HARMONICS + 1);
+    for (let n = 1; n <= WT_HARMONICS; n++) imag[n] = harmonicFn(n);
+    return ctx.createPeriodicWave(real, imag);
+  };
+
+  class WavetableEngine {
+    constructor(ctx, position = 0) {
+      this.ctx = ctx;
+      this.master = ctx.createGain();
+      this.master.gain.value = 0.28;
+      this.comp = ctx.createDynamicsCompressor();
+      this.master.connect(this.comp);
+      this.comp.connect(ctx.destination);
+      this.voices = new Map();
+      this.bendCents = new Map();
+      this.modAmount = new Map();
+      this.waves = WT_BANK.map(entry => makeBankWave(ctx, entry.h));
+      this.position = Math.max(0, Math.min(this.waves.length - 1, position));
+    }
+    setPosition(p) {
+      const clamped = Math.max(0, Math.min(this.waves.length - 1, p));
+      this.position = clamped;
+      // Update crossfade for held notes within their locked pair.
+      const t = this.ctx.currentTime;
+      for (const voice of this.voices.values()) {
+        let fadeA, fadeB;
+        if (clamped <= voice.lowIdx) { fadeA = 1; fadeB = 0; }
+        else if (clamped >= voice.highIdx) { fadeA = 0; fadeB = 1; }
+        else {
+          const f = clamped - voice.lowIdx;
+          fadeA = 1 - f; fadeB = f;
+        }
+        voice.gainA.gain.setTargetAtTime(fadeA, t, 0.01);
+        voice.gainB.gain.setTargetAtTime(fadeB, t, 0.01);
+      }
+    }
+    noteOn(ch, n, v) {
+      this.noteOff(ch, n);
+      const t = this.ctx.currentTime;
+      const baseFreq = 440 * Math.pow(2, (n - 69) / 12);
+      const bendCents = this.bendCents.get(ch) || 0;
+      const vibratoDepth = (this.modAmount.get(ch) || 0) * VIBRATO_MAX_CENTS;
+
+      const lowIdx  = Math.min(this.waves.length - 1, Math.floor(this.position));
+      const highIdx = Math.min(this.waves.length - 1, lowIdx + 1);
+      const frac = this.position - lowIdx;
+
+      const oscA = this.ctx.createOscillator();
+      oscA.setPeriodicWave(this.waves[lowIdx]);
+      oscA.frequency.value = baseFreq;
+      oscA.detune.value = bendCents;
+
+      const oscB = this.ctx.createOscillator();
+      oscB.setPeriodicWave(this.waves[highIdx]);
+      oscB.frequency.value = baseFreq;
+      oscB.detune.value = bendCents;
+
+      const gainA = this.ctx.createGain();
+      gainA.gain.value = 1 - frac;
+      const gainB = this.ctx.createGain();
+      gainB.gain.value = frac;
+      oscA.connect(gainA);
+      oscB.connect(gainB);
+
+      const vibOsc = this.ctx.createOscillator();
+      vibOsc.type = 'sine';
+      vibOsc.frequency.value = VIBRATO_HZ;
+      const vibGain = this.ctx.createGain();
+      vibGain.gain.value = vibratoDepth;
+      vibOsc.connect(vibGain);
+      vibGain.connect(oscA.detune);
+      vibGain.connect(oscB.detune);
+
+      const ampGain = this.ctx.createGain();
+      ampGain.gain.value = 0;
+      gainA.connect(ampGain);
+      gainB.connect(ampGain);
+      ampGain.connect(this.master);
+
+      const peak = (v / 127) * 0.55;
+      ampGain.gain.linearRampToValueAtTime(peak, t + 0.01);
+
+      oscA.start(t); oscB.start(t); vibOsc.start(t);
+
+      this.voices.set(`${ch}-${n}`, { oscA, oscB, gainA, gainB, ampGain, vibOsc, vibGain, lowIdx, highIdx });
+    }
+    noteOff(ch, n) {
+      const k = `${ch}-${n}`;
+      const v = this.voices.get(k);
+      if (!v) return;
+      const t = this.ctx.currentTime;
+      v.ampGain.gain.cancelScheduledValues(t);
+      v.ampGain.gain.setValueAtTime(v.ampGain.gain.value, t);
+      v.ampGain.gain.linearRampToValueAtTime(0.0001, t + 0.12);
+      const stopAt = t + 0.14;
+      try { v.oscA.stop(stopAt); } catch (_) {}
+      try { v.oscB.stop(stopAt); } catch (_) {}
+      try { v.vibOsc.stop(stopAt); } catch (_) {}
+      this.voices.delete(k);
+    }
+    pitchBend(ch, value) {
+      const cents = (value / 8192) * BEND_RANGE_SEMITONES * 100;
+      this.bendCents.set(ch, cents);
+      const t = this.ctx.currentTime;
+      for (const [k, v] of this.voices) {
+        if (Number(k.split('-')[0]) !== ch) continue;
+        v.oscA.detune.setTargetAtTime(cents, t, 0.005);
+        v.oscB.detune.setTargetAtTime(cents, t, 0.005);
+      }
+    }
+    modWheel(ch, value) {
+      const amt = value / 127;
+      this.modAmount.set(ch, amt);
+      const target = amt * VIBRATO_MAX_CENTS;
+      const t = this.ctx.currentTime;
+      for (const [k, v] of this.voices) {
+        if (Number(k.split('-')[0]) !== ch) continue;
+        v.vibGain.gain.setTargetAtTime(target, t, 0.02);
+      }
+    }
+    panic() {
+      for (const k of [...this.voices.keys()]) {
+        const [ch, n] = k.split('-').map(Number);
+        this.noteOff(ch, n);
+      }
+    }
+    destroy() {
+      this.panic();
+      setTimeout(() => {
+        try { this.master.disconnect(); } catch (_) {}
+        try { this.comp.disconnect(); } catch (_) {}
+      }, 250);
+    }
+  }
+
   // Sample-based GM synth via soundfont-player.
   // Pitch bend support is best-effort: we reach into the returned voice
   // object for an AudioBufferSourceNode-shaped detune AudioParam. The
@@ -899,6 +1100,7 @@
     if (engine) { try { engine.destroy(); } catch (_) {} engine = null; }
     oscEngineEl.classList.add('hidden');
     fmEngineEl.classList.add('hidden');
+    wtEngineEl.classList.add('hidden');
     sfEngineEl.classList.add('hidden');
 
     if (kind === 'osc') {
@@ -907,6 +1109,9 @@
     } else if (kind === 'fm') {
       fmEngineEl.classList.remove('hidden');
       engine = new FMEngine(ensureAudioCtx(), getFmPreset());
+    } else if (kind === 'wavetable') {
+      wtEngineEl.classList.remove('hidden');
+      engine = new WavetableEngine(ensureAudioCtx(), parseFloat(wtPositionInput.value));
     } else if (kind === 'soundfont') {
       sfEngineEl.classList.remove('hidden');
       if (typeof Soundfont === 'undefined') {
@@ -991,6 +1196,20 @@
   fmPresetGroup.addEventListener('change', () => {
     if (engine instanceof FMEngine) engine.setPreset(getFmPreset());
   });
+  const updateWtPositionLabel = () => {
+    const p = parseFloat(wtPositionInput.value);
+    const lo = Math.min(WT_BANK.length - 1, Math.floor(p));
+    const hi = Math.min(WT_BANK.length - 1, lo + 1);
+    const blend = lo === hi
+      ? WT_BANK[lo].name
+      : `${WT_BANK[lo].name} → ${WT_BANK[hi].name}`;
+    wtPositionLabel.textContent = `${p.toFixed(2)} — ${blend}`;
+  };
+  wtPositionInput.addEventListener('input', () => {
+    updateWtPositionLabel();
+    if (engine instanceof WavetableEngine) engine.setPosition(parseFloat(wtPositionInput.value));
+  });
+  updateWtPositionLabel();
   sfInstrumentSelect.addEventListener('change', () => {
     if (engine instanceof SoundfontEngine) engine.load(sfInstrumentSelect.value);
   });
