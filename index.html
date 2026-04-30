@@ -124,6 +124,7 @@
         <option value="osc">PSG Synth</option>
         <option value="fm">FM synth</option>
         <option value="wavetable">Wavetable synth</option>
+        <option value="drums">Drums</option>
         <option value="soundfont" selected>Soundfont sampler</option>
       </select>
     </div>
@@ -171,6 +172,18 @@
         <input id="wt-position" type="range" min="0" max="7" step="0.01" value="0">
       </div>
       <div class="engine-status">Eight waveforms in a small bank (sine → triangle → square → sawtooth → pulses → harmonics-rich → spike). Slider crossfades between adjacent positions; while a note is held it morphs within the locked pair, and new notes lock to the current position.</div>
+    </div>
+
+    <div id="engine-drums" class="engine-controls hidden">
+      <div class="field">
+        <label>Kit</label>
+        <div id="drum-kit" class="seg">
+          <input type="radio" id="dk-606"  name="drum-kit" value="606" checked><label for="dk-606">TR-606</label>
+          <input type="radio" id="dk-80s"  name="drum-kit" value="80s"><label for="dk-80s">80s gated</label>
+          <input type="radio" id="dk-cr78" name="drum-kit" value="cr78"><label for="dk-cr78">CR-78</label>
+        </div>
+      </div>
+      <div class="engine-status">Three synthesised kits sharing one set of primitives with kit-specific parameters. The <em>80s gated</em> kit sends snare and toms through a ConvolverNode whose impulse response we synthesise on the fly — dense decaying noise truncated and faded at ~120 ms = the iconic chop. Listens on channel 10 only; notes 35–59 trigger kit pieces.</div>
     </div>
 
     <div id="engine-soundfont" class="engine-controls hidden">
@@ -230,6 +243,7 @@
   const oscEngineEl = $('engine-osc');
   const fmEngineEl = $('engine-fm');
   const wtEngineEl = $('engine-wt');
+  const drumsEngineEl = $('engine-drums');
   const sfEngineEl = $('engine-soundfont');
   const oscTypeGroup = $('osc-type');
   const getOscType = () => oscTypeGroup.querySelector('input[name="osc-type"]:checked')?.value || 'triangle';
@@ -237,6 +251,8 @@
   const getFmPreset = () => fmPresetGroup.querySelector('input[name="fm-preset"]:checked')?.value || 'ep';
   const wtPositionInput = $('wt-position');
   const wtPositionLabel = $('wt-position-label');
+  const drumKitGroup = $('drum-kit');
+  const getDrumKit = () => drumKitGroup.querySelector('input[name="drum-kit"]:checked')?.value || '606';
   const sfInstrumentSelect = $('sf-instrument');
   const sfStatusEl = $('sf-status');
   const bendNeedle = $('bend-needle');
@@ -943,6 +959,416 @@
     }
   }
 
+  // ----- Drums (synthesized, three kits with parameterised voices) -----
+  // Each voice is a small subgraph of OscillatorNodes / filtered noise routed
+  // to a kit-specific master plus a parallel "reverb send" that feeds a
+  // ConvolverNode whose impulse response we synthesise on the fly. The 80s
+  // kit gates that IR (truncates and hard-fades after ~130ms) for the classic
+  // Phil Collins / Simmons sound.
+
+  // Synthesised gated impulse response: dense decaying noise that's chopped
+  // and faded to a hard tail. Length controls the gate point.
+  const makeGatedIR = (ctx, durationSec = 0.13, decayPower = 1.6) => {
+    const sr = ctx.sampleRate;
+    const length = Math.max(1, Math.floor(sr * durationSec));
+    const buf = ctx.createBuffer(2, length, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const data = buf.getChannelData(ch);
+      for (let i = 0; i < length; i++) {
+        const t = i / length;
+        // Don't fully decay before the gate kicks in — that keeps the tail
+        // loud right up to the cutoff, which is where the iconic chop comes
+        // from. The 0.55 stops it sliding to silence on its own.
+        const env = Math.pow(1 - t * 0.55, decayPower);
+        data[i] = (Math.random() * 2 - 1) * env;
+      }
+      // Hard fade in the last 8% so the cutoff doesn't click.
+      const fadeStart = Math.floor(length * 0.92);
+      for (let i = fadeStart; i < length; i++) {
+        data[i] *= (length - i) / (length - fadeStart);
+      }
+    }
+    return buf;
+  };
+
+  // Per-kit parameter dictionaries. Each kit uses the same synthesis
+  // primitives but parameters are pushed hard so the three kits inhabit
+  // genuinely different tonal worlds:
+  //  - 606 = tight, sharp, minimal — short decays, bright noise, highpassed master
+  //  - 80s = huge, gated, hyped — long booming kick, lower thicker snare, gated reverb
+  //  - cr78 = warm, dark, woody — rolled-off highs, dark noise, longer softer transients
+  // Per-kit master color (BiquadFilter) is the single biggest differentiator;
+  // master level and reverb return level scale by kit too.
+  const DRUM_KITS = {
+    '606': {
+      label: 'TR-606',
+      // Tight high-pass takes weight off the low end, shifts character to "click".
+      color:        { type: 'highpass', freq: 90, Q: 0.7, gain: 0 },
+      masterLevel:  0.45,
+      reverbReturn: 0.5,
+      kick:    { startFreq: 90,  endFreq: 55, decay: 0.13, level: 1.0 },
+      snare:   { tonalFreq: 220, tonalDecay: 0.018, noiseHP: 2500,
+                 noiseDecay: 0.07, tonalLevel: 0.2,  noiseLevel: 0.95 },
+      tom:     { sweepFactor: 1.4, decay: 0.22, level: 0.85 },
+      hat:     { hpFreq: 10000, level: 0.5 },
+      cymbal:  { decay: 1.0, brightness: 7500, level: 0.5 },
+      clap:    { decay: 0.15, bandFreq: 1700 },
+      cowbell: { f1: 540, f2: 800, decay: 0.18, level: 0.3 },
+      reverbSend: { kick: 0, snare: 0, tom: 0, hat: 0, cymbal: 0, clap: 0, cowbell: 0 }
+    },
+    '80s': {
+      label: '80s gated',
+      // Peaking boost in the upper-mids gives that "produced" 80s cut.
+      color:        { type: 'peaking', freq: 3500, Q: 0.8, gain: 6 },
+      masterLevel:  0.55,
+      reverbReturn: 1.1,
+      // Booming low-tuned kick with a long body.
+      kick:    { startFreq: 70,  endFreq: 28, decay: 0.55, level: 1.0 },
+      // Lower, thicker tonal layer + a long noise tail soaked in gated reverb.
+      snare:   { tonalFreq: 170, tonalDecay: 0.06, noiseHP: 900,
+                 noiseDecay: 0.22, tonalLevel: 0.55, noiseLevel: 1.0 },
+      // Bigger tom sweep, longer decay = the gated-fill sound.
+      tom:     { sweepFactor: 1.9, decay: 0.65, level: 1.0 },
+      hat:     { hpFreq: 6500, level: 0.3 },
+      cymbal:  { decay: 1.8, brightness: 5000, level: 0.5 },
+      clap:    { decay: 0.30, bandFreq: 1400 },
+      cowbell: { f1: 540, f2: 800, decay: 0.28, level: 0.35 },
+      reverbSend: { kick: 0.15, snare: 0.95, tom: 1.0, hat: 0.15, cymbal: 0.5, clap: 0.7, cowbell: 0.5 }
+    },
+    'cr78': {
+      label: 'CR-78',
+      // Lowpass rolls off above ~5.5 kHz — the iconic warm/woody analog feel.
+      color:        { type: 'lowpass', freq: 5500, Q: 0.6, gain: 0 },
+      masterLevel:  0.40,
+      reverbReturn: 0.5,
+      // Higher-tuned kick that doesn't sub. Slower softer transient.
+      kick:    { startFreq: 130, endFreq: 55, decay: 0.30, level: 0.85 },
+      // Very dark snare — noise highpass at 600Hz means almost no sizzle, just
+      // a woody thwack. The slightly higher tonal body adds vintage character.
+      snare:   { tonalFreq: 250, tonalDecay: 0.035, noiseHP: 600,
+                 noiseDecay: 0.18, tonalLevel: 0.4,  noiseLevel: 0.65 },
+      tom:     { sweepFactor: 1.3, decay: 0.45, level: 0.85 },
+      hat:     { hpFreq: 4500, level: 0.32 },
+      cymbal:  { decay: 0.8, brightness: 3500, level: 0.45 },
+      clap:    { decay: 0.22, bandFreq: 1100 },
+      cowbell: { f1: 540, f2: 800, decay: 0.22, level: 0.3 },
+      reverbSend: { kick: 0.1, snare: 0.3, tom: 0.35, hat: 0.05, cymbal: 0.2, clap: 0.25, cowbell: 0.1 }
+    }
+  };
+
+  // GM percussion key map → which voice family + (where applicable) per-note
+  // overrides like tom pitch.
+  const DRUM_NOTE_MAP = {
+    35: { voice: 'kick',    over: { startFreq: 90,  endFreq: 32 } },
+    36: { voice: 'kick' },
+    37: { voice: 'sidestick' },
+    38: { voice: 'snare' },
+    39: { voice: 'clap' },
+    40: { voice: 'snare',   over: { tonalFreq: 250, tonalDecay: 0.025, noiseDecay: 0.10 } },
+    41: { voice: 'tom',     freq: 80 },
+    42: { voice: 'hat',     decay: 0.05 },
+    43: { voice: 'tom',     freq: 100 },
+    44: { voice: 'hat',     decay: 0.04 },
+    45: { voice: 'tom',     freq: 130 },
+    46: { voice: 'hat',     decay: 0.30 },
+    47: { voice: 'tom',     freq: 165 },
+    48: { voice: 'tom',     freq: 210 },
+    49: { voice: 'cymbal' },
+    50: { voice: 'tom',     freq: 270 },
+    51: { voice: 'ride' },
+    52: { voice: 'cymbal',  over: { decay: 1.2, brightness: 6500 } },
+    53: { voice: 'ridebell' },
+    54: { voice: 'tambourine' },
+    55: { voice: 'cymbal',  over: { decay: 0.5, brightness: 6000 } },
+    56: { voice: 'cowbell' },
+    57: { voice: 'cymbal' },
+    59: { voice: 'ride' }
+  };
+
+  class DrumEngine {
+    constructor(ctx, kitName = '606') {
+      this.ctx = ctx;
+      // Signal chain: voices → master → colorFilter → comp → destination
+      //               voices → sendGain → reverb → reverbReturn → master
+      this.master = ctx.createGain();
+      this.colorFilter = ctx.createBiquadFilter();
+      this.comp = ctx.createDynamicsCompressor();
+      this.comp.threshold.value = -18;
+      this.comp.ratio.value = 6;
+      this.comp.attack.value = 0.005;
+      this.comp.release.value = 0.12;
+      this.master.connect(this.colorFilter);
+      this.colorFilter.connect(this.comp);
+      this.comp.connect(ctx.destination);
+      // Parallel gated-reverb bus.
+      this.reverb = ctx.createConvolver();
+      this.reverb.buffer = makeGatedIR(ctx);
+      this.reverbReturn = ctx.createGain();
+      this.reverb.connect(this.reverbReturn);
+      this.reverbReturn.connect(this.master);
+      this.activeGains = new Set();
+      // Shared noise buffer — reused for every hit that needs noise.
+      const noiseSec = 2;
+      this.noiseBuffer = ctx.createBuffer(1, noiseSec * ctx.sampleRate, ctx.sampleRate);
+      const data = this.noiseBuffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      this.setKit(kitName);
+    }
+    setKit(name) {
+      if (!DRUM_KITS[name]) return;
+      this.kitName = name;
+      this.kit = DRUM_KITS[name];
+      // Apply per-kit coloration, master level, and reverb return.
+      const c = this.kit.color;
+      this.colorFilter.type = c.type;
+      this.colorFilter.frequency.value = c.freq;
+      this.colorFilter.Q.value = c.Q ?? 1;
+      this.colorFilter.gain.value = c.gain ?? 0;
+      this.master.gain.value = this.kit.masterLevel;
+      this.reverbReturn.gain.value = this.kit.reverbReturn;
+    }
+    _noise() {
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      return src;
+    }
+    _track(g, dur) {
+      this.activeGains.add(g);
+      setTimeout(() => this.activeGains.delete(g), dur * 1000 + 200);
+    }
+    _envHit(g, t, peak, decay, attack = 0.002) {
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(Math.max(peak, 0.0001), t + attack);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+    }
+    // Route a voice's amp gain to master, plus a parallel send to the reverb
+    // bus scaled by the kit's per-family send amount.
+    _route(g, family) {
+      g.connect(this.master);
+      const send = this.kit.reverbSend[family] || 0;
+      if (send > 0) {
+        const sg = this.ctx.createGain();
+        sg.gain.value = send;
+        g.connect(sg);
+        sg.connect(this.reverb);
+      }
+    }
+    _kick(t, vel, over = {}) {
+      const k = { ...this.kit.kick, ...over };
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(k.startFreq, t);
+      osc.frequency.exponentialRampToValueAtTime(k.endFreq, t + k.decay * 0.6);
+      const g = this.ctx.createGain();
+      this._envHit(g, t, vel * k.level, k.decay);
+      osc.connect(g);
+      this._route(g, 'kick');
+      osc.start(t); osc.stop(t + k.decay + 0.05);
+      this._track(g, k.decay);
+    }
+    _snare(t, vel, over = {}) {
+      const s = { ...this.kit.snare, ...over };
+      // Tone body — short transient, NOT a sustained note.
+      const osc = this.ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(s.tonalFreq, t);
+      osc.frequency.exponentialRampToValueAtTime(s.tonalFreq * 0.55, t + s.tonalDecay * 0.6);
+      const tg = this.ctx.createGain();
+      this._envHit(tg, t, vel * s.tonalLevel, s.tonalDecay);
+      osc.connect(tg);
+      this._route(tg, 'snare');
+      osc.start(t); osc.stop(t + s.tonalDecay + 0.05);
+      // Noise — dominant component (the snare wires).
+      const noise = this._noise();
+      const filt = this.ctx.createBiquadFilter();
+      filt.type = 'highpass'; filt.frequency.value = s.noiseHP; filt.Q.value = 0.8;
+      const ng = this.ctx.createGain();
+      this._envHit(ng, t, vel * s.noiseLevel, s.noiseDecay);
+      noise.connect(filt); filt.connect(ng);
+      this._route(ng, 'snare');
+      noise.start(t); noise.stop(t + s.noiseDecay + 0.05);
+      this._track(tg, s.tonalDecay); this._track(ng, s.noiseDecay);
+    }
+    _tom(t, vel, over = {}) {
+      const k = this.kit.tom;
+      const freq = over.freq ?? 130;
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq * k.sweepFactor, t);
+      osc.frequency.exponentialRampToValueAtTime(freq, t + 0.08);
+      const g = this.ctx.createGain();
+      this._envHit(g, t, vel * k.level, k.decay);
+      osc.connect(g);
+      this._route(g, 'tom');
+      osc.start(t); osc.stop(t + k.decay + 0.05);
+      this._track(g, k.decay);
+    }
+    _hat(t, vel, over = {}) {
+      const h = this.kit.hat;
+      const decay = over.decay || 0.06;
+      const noise = this._noise();
+      const filt = this.ctx.createBiquadFilter();
+      filt.type = 'highpass'; filt.frequency.value = h.hpFreq; filt.Q.value = 1;
+      const g = this.ctx.createGain();
+      this._envHit(g, t, vel * h.level, decay);
+      noise.connect(filt); filt.connect(g);
+      this._route(g, 'hat');
+      noise.start(t); noise.stop(t + decay + 0.05);
+      this._track(g, decay);
+    }
+    _cymbal(t, vel, over = {}) {
+      const c = { ...this.kit.cymbal, ...over };
+      const ratios = [1.0, 1.342, 1.789, 2.378, 3.16, 4.218];
+      const baseFreq = 540;
+      const sumSq = this.ctx.createGain();
+      sumSq.gain.value = 0.05;
+      const oscs = ratios.map(r => {
+        const o = this.ctx.createOscillator();
+        o.type = 'square'; o.frequency.value = baseFreq * r;
+        o.connect(sumSq); return o;
+      });
+      const sqFilt = this.ctx.createBiquadFilter();
+      sqFilt.type = 'highpass'; sqFilt.frequency.value = c.brightness;
+      sumSq.connect(sqFilt);
+      const noise = this._noise();
+      const noiseFilt = this.ctx.createBiquadFilter();
+      noiseFilt.type = 'highpass'; noiseFilt.frequency.value = c.brightness;
+      noise.connect(noiseFilt);
+      const g = this.ctx.createGain();
+      this._envHit(g, t, vel * c.level, c.decay, 0.005);
+      sqFilt.connect(g); noiseFilt.connect(g);
+      this._route(g, 'cymbal');
+      for (const o of oscs) { o.start(t); o.stop(t + c.decay + 0.05); }
+      noise.start(t); noise.stop(t + c.decay + 0.05);
+      this._track(g, c.decay);
+    }
+    _ride(t, vel) {
+      this._cymbal(t, vel * 0.65, { decay: 1.0, brightness: 4000 });
+      const osc = this.ctx.createOscillator();
+      osc.type = 'square'; osc.frequency.value = 1200;
+      const g = this.ctx.createGain();
+      this._envHit(g, t, vel * 0.18, 0.3);
+      osc.connect(g);
+      this._route(g, 'cymbal');
+      osc.start(t); osc.stop(t + 0.35);
+      this._track(g, 0.35);
+    }
+    _ridebell(t, vel) {
+      for (const f of [1200, 2700]) {
+        const osc = this.ctx.createOscillator();
+        osc.type = 'square'; osc.frequency.value = f;
+        const g = this.ctx.createGain();
+        this._envHit(g, t, vel * (f === 1200 ? 0.4 : 0.18), f === 1200 ? 0.55 : 0.3);
+        osc.connect(g);
+        this._route(g, 'cymbal');
+        osc.start(t); osc.stop(t + 0.6);
+        this._track(g, 0.6);
+      }
+    }
+    _clap(t, vel) {
+      const c = this.kit.clap;
+      const offsets = [0, 0.012, 0.024];
+      for (const off of offsets) {
+        const noise = this._noise();
+        const filt = this.ctx.createBiquadFilter();
+        filt.type = 'bandpass'; filt.frequency.value = c.bandFreq; filt.Q.value = 1.2;
+        const g = this.ctx.createGain();
+        this._envHit(g, t + off, vel * 0.55, 0.025);
+        noise.connect(filt); filt.connect(g);
+        this._route(g, 'clap');
+        noise.start(t + off); noise.stop(t + off + 0.05);
+        this._track(g, off + 0.05);
+      }
+      const noise = this._noise();
+      const filt = this.ctx.createBiquadFilter();
+      filt.type = 'bandpass'; filt.frequency.value = c.bandFreq + 300; filt.Q.value = 1;
+      const g = this.ctx.createGain();
+      this._envHit(g, t + 0.03, vel * 0.4, c.decay, 0.005);
+      noise.connect(filt); filt.connect(g);
+      this._route(g, 'clap');
+      noise.start(t + 0.03); noise.stop(t + c.decay + 0.05);
+      this._track(g, c.decay);
+    }
+    _cowbell(t, vel) {
+      const c = this.kit.cowbell;
+      for (const f of [c.f1, c.f2]) {
+        const osc = this.ctx.createOscillator();
+        osc.type = 'square'; osc.frequency.value = f;
+        const g = this.ctx.createGain();
+        this._envHit(g, t, vel * c.level, c.decay);
+        osc.connect(g);
+        this._route(g, 'cowbell');
+        osc.start(t); osc.stop(t + c.decay + 0.05);
+        this._track(g, c.decay);
+      }
+    }
+    _sidestick(t, vel) {
+      const noise = this._noise();
+      const filt = this.ctx.createBiquadFilter();
+      filt.type = 'bandpass'; filt.frequency.value = 4000; filt.Q.value = 2;
+      const ng = this.ctx.createGain();
+      this._envHit(ng, t, vel * 0.45, 0.04, 0.001);
+      noise.connect(filt); filt.connect(ng);
+      this._route(ng, 'snare');
+      noise.start(t); noise.stop(t + 0.06);
+      const osc = this.ctx.createOscillator();
+      osc.type = 'square'; osc.frequency.value = 1500;
+      const g = this.ctx.createGain();
+      this._envHit(g, t, vel * 0.25, 0.025, 0.001);
+      osc.connect(g);
+      this._route(g, 'snare');
+      osc.start(t); osc.stop(t + 0.05);
+      this._track(ng, 0.06); this._track(g, 0.05);
+    }
+    _tambourine(t, vel) {
+      const noise = this._noise();
+      const filt = this.ctx.createBiquadFilter();
+      filt.type = 'highpass'; filt.frequency.value = 7000; filt.Q.value = 0.7;
+      const g = this.ctx.createGain();
+      this._envHit(g, t, vel * 0.5, 0.1);
+      noise.connect(filt); filt.connect(g);
+      this._route(g, 'cymbal');
+      noise.start(t); noise.stop(t + 0.15);
+      this._track(g, 0.15);
+    }
+    noteOn(ch, n, v) {
+      // GM convention: drums on channel 10 only.
+      if (ch !== 10) return;
+      const recipe = DRUM_NOTE_MAP[n];
+      if (!recipe) return;
+      const t = this.ctx.currentTime;
+      const vel = 0.3 + 0.7 * (v / 127);
+      const fn = this[`_${recipe.voice}`];
+      if (!fn) return;
+      // Pass either explicit per-note overrides ({ over: {...} }) or
+      // legacy-style { freq, decay } direct arg fields. _tom and _hat read
+      // those directly; the rest read .over.
+      const arg = recipe.over ?? recipe;
+      fn.call(this, t, vel, arg);
+    }
+    noteOff() {} // one-shots
+    panic() {
+      const t = this.ctx.currentTime;
+      for (const g of this.activeGains) {
+        try {
+          g.gain.cancelScheduledValues(t);
+          g.gain.linearRampToValueAtTime(0.0001, t + 0.03);
+        } catch (_) {}
+      }
+      this.activeGains.clear();
+    }
+    destroy() {
+      this.panic();
+      setTimeout(() => {
+        try { this.master.disconnect(); } catch (_) {}
+        try { this.colorFilter.disconnect(); } catch (_) {}
+        try { this.comp.disconnect(); } catch (_) {}
+        try { this.reverb.disconnect(); } catch (_) {}
+        try { this.reverbReturn.disconnect(); } catch (_) {}
+      }, 250);
+    }
+  }
+
   // Sample-based GM synth via soundfont-player.
   // Pitch bend support is best-effort: we reach into the returned voice
   // object for an AudioBufferSourceNode-shaped detune AudioParam. The
@@ -966,16 +1392,18 @@
       this.instName = null;
       this.voices = new Map();
       this.loadToken = 0;
+      this.destroyed = false;
       this.bendCents = new Map(); // ch -> cents
     }
     async load(name) {
+      if (this.destroyed) return;
       const token = ++this.loadToken;
       this.panic();
       sfStatusEl.textContent = `Loading "${name}"…`;
       sfStatusEl.classList.remove('warn');
       try {
         const inst = await Soundfont.instrument(this.ctx, name, { destination: this.master });
-        if (token !== this.loadToken) return; // superseded by another load
+        if (this.destroyed || token !== this.loadToken) return;
         this.inst = inst;
         this.instName = name;
         sfStatusEl.textContent = `Loaded "${name}".`;
@@ -985,7 +1413,7 @@
       }
     }
     noteOn(ch, n, v) {
-      if (!this.inst) return;
+      if (this.destroyed || !this.inst) return;
       this.noteOff(ch, n);
       const node = this.inst.play(n, this.ctx.currentTime, { gain: (v / 127) * 1.5 });
       const cents = this.bendCents.get(ch) || 0;
@@ -1004,6 +1432,7 @@
       }
     }
     pitchBend(ch, value) {
+      if (this.destroyed) return;
       const cents = (value / 8192) * BEND_RANGE_SEMITONES * 100;
       this.bendCents.set(ch, cents);
       const t = this.ctx.currentTime;
@@ -1015,12 +1444,31 @@
       }
     }
     panic() {
-      for (const node of this.voices.values()) { try { node.stop(); } catch (_) {} }
+      for (const node of this.voices.values()) {
+        try { node.stop(this.ctx.currentTime); } catch (_) {}
+      }
       this.voices.clear();
     }
     destroy() {
+      // Aggressive teardown: drop the instrument reference, mute the master
+      // immediately (in case soundfont-player's per-voice release ramps are
+      // longer than expected), and disconnect synchronously. Also neuter the
+      // instrument's play()/stop() in case any stray reference is held
+      // somewhere we don't control.
+      this.destroyed = true;
       this.panic();
-      setTimeout(() => { try { this.master.disconnect(); } catch (_) {} }, 250);
+      if (this.inst) {
+        try { this.inst.play = () => null; } catch (_) {}
+        try { this.inst.stop = () => null; } catch (_) {}
+      }
+      this.inst = null;
+      const t = this.ctx.currentTime;
+      try {
+        this.master.gain.cancelScheduledValues(t);
+        this.master.gain.setValueAtTime(this.master.gain.value, t);
+        this.master.gain.linearRampToValueAtTime(0.0001, t + 0.02);
+      } catch (_) {}
+      try { this.master.disconnect(); } catch (_) {}
     }
   }
 
@@ -1101,6 +1549,7 @@
     oscEngineEl.classList.add('hidden');
     fmEngineEl.classList.add('hidden');
     wtEngineEl.classList.add('hidden');
+    drumsEngineEl.classList.add('hidden');
     sfEngineEl.classList.add('hidden');
 
     if (kind === 'osc') {
@@ -1112,6 +1561,9 @@
     } else if (kind === 'wavetable') {
       wtEngineEl.classList.remove('hidden');
       engine = new WavetableEngine(ensureAudioCtx(), parseFloat(wtPositionInput.value));
+    } else if (kind === 'drums') {
+      drumsEngineEl.classList.remove('hidden');
+      engine = new DrumEngine(ensureAudioCtx(), getDrumKit());
     } else if (kind === 'soundfont') {
       sfEngineEl.classList.remove('hidden');
       if (typeof Soundfont === 'undefined') {
@@ -1195,6 +1647,9 @@
   });
   fmPresetGroup.addEventListener('change', () => {
     if (engine instanceof FMEngine) engine.setPreset(getFmPreset());
+  });
+  drumKitGroup.addEventListener('change', () => {
+    if (engine instanceof DrumEngine) engine.setKit(getDrumKit());
   });
   const updateWtPositionLabel = () => {
     const p = parseFloat(wtPositionInput.value);
