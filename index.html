@@ -147,10 +147,14 @@
           <input type="radio" id="fm-bell"    name="fm-preset" value="bell"><label for="fm-bell">bell</label>
           <input type="radio" id="fm-bass"    name="fm-preset" value="bass"><label for="fm-bass">bass</label>
           <input type="radio" id="fm-brass"   name="fm-preset" value="brass"><label for="fm-brass">brass</label>
-          <input type="radio" id="fm-marimba" name="fm-preset" value="marimba"><label for="fm-marimba">marimba</label>
-          <input type="radio" id="fm-harp"    name="fm-preset" value="harp"><label for="fm-harp">harp</label>
-          <input type="radio" id="fm-strings" name="fm-preset" value="strings"><label for="fm-strings">strings</label>
-          <input type="radio" id="fm-whistle" name="fm-preset" value="whistle"><label for="fm-whistle">whistle</label>
+          <input type="radio" id="fm-marimba"   name="fm-preset" value="marimba"><label for="fm-marimba">marimba</label>
+          <input type="radio" id="fm-harp"      name="fm-preset" value="harp"><label for="fm-harp">harp</label>
+          <input type="radio" id="fm-strings"   name="fm-preset" value="strings"><label for="fm-strings">strings</label>
+          <input type="radio" id="fm-whistle"   name="fm-preset" value="whistle"><label for="fm-whistle">whistle</label>
+          <input type="radio" id="fm-harmonica" name="fm-preset" value="harmonica"><label for="fm-harmonica">harmonica</label>
+          <input type="radio" id="fm-tubular"   name="fm-preset" value="tubular"><label for="fm-tubular">tubular</label>
+          <input type="radio" id="fm-orchhit"   name="fm-preset" value="orchhit"><label for="fm-orchhit">orch hit</label>
+          <input type="radio" id="fm-pad"       name="fm-preset" value="pad"><label for="fm-pad">pad</label>
         </div>
       </div>
       <div class="engine-status">Six sine operators per voice, wired into one of four hand-picked DX-style algorithms (one per preset). Pitch bend and mod wheel apply to all six operators.</div>
@@ -524,6 +528,65 @@
         { ratio: 1.0,   level: 0.0,  a: 0.01, d: 0.05, s: 0.0,  r: 0.05 },
         { ratio: 1.0,   level: 0.0,  a: 0.01, d: 0.05, s: 0.0,  r: 0.05 },
         { ratio: 1.0,   level: 0.0,  a: 0.01, d: 0.05, s: 0.0,  r: 0.05 }
+      ]
+    },
+    harmonica: {
+      // DX7 "HARMONICA" — Tina Turner "What's Love Got to Do With It" reedy
+      // breath. Sustained, slow-ish attack, gentle 2nd-harmonic mod for the
+      // reed buzz, plus an octave-up partial and sub for body.
+      algorithm: { mods: [[2,1],[4,3]], carriers: [1,3,5] },
+      ops: [
+        { ratio: 1.0,   level: 0.85, a: 0.04, d: 0.10, s: 0.85, r: 0.20 },
+        { ratio: 2.0,   level: 0.50, a: 0.04, d: 0.50, s: 0.50, r: 0.20 },
+        { ratio: 3.0,   level: 0.40, a: 0.05, d: 0.20, s: 0.70, r: 0.20 },
+        { ratio: 1.0,   level: 0.30, a: 0.05, d: 0.20, s: 0.40, r: 0.20 },
+        { ratio: 0.5,   level: 0.40, a: 0.06, d: 0.20, s: 0.70, r: 0.20 },
+        { ratio: 1.005, level: 0.20, a: 0.05, d: 0.10, s: 0.60, r: 0.20 }
+      ]
+    },
+    tubular: {
+      // Bright pitched chimes (DX7 "TUB BELLS" / Faltermeyer-era 80s bell
+      // hits). Harmonic ratios — cleaner and more pitched than the inharmonic
+      // "bell" preset — and a fast modulator decay so the strike is bright
+      // and the body stays sweet.
+      algorithm: { mods: [[2,1],[3,1],[4,1]], carriers: [1,5] },
+      ops: [
+        { ratio: 1.0, level: 0.95, a: 0.001, d: 4.5,  s: 0.0, r: 3.5 },
+        { ratio: 2.0, level: 0.55, a: 0.001, d: 1.0,  s: 0.0, r: 0.6 },
+        { ratio: 4.0, level: 0.40, a: 0.001, d: 0.5,  s: 0.0, r: 0.4 },
+        { ratio: 7.0, level: 0.25, a: 0.001, d: 0.3,  s: 0.0, r: 0.2 },
+        { ratio: 0.5, level: 0.45, a: 0.001, d: 3.5,  s: 0.2, r: 2.5 },
+        { ratio: 1.0, level: 0.0,  a: 0.001, d: 0.05, s: 0.0, r: 0.05 }
+      ]
+    },
+    orchhit: {
+      // 80s "orch hit" stab (DX7 "ORCH HIT" + Fairlight ORCH5 territory).
+      // Five parallel carriers piled up at harmonic ratios produce dense
+      // brass-and-strings content; near-instant attack and short decay (no
+      // sustain) gives the iconic punch.
+      algorithm: { mods: [[2,1]], carriers: [1,3,4,5,6] },
+      ops: [
+        { ratio: 1.0, level: 0.80, a: 0.001, d: 0.25, s: 0.0, r: 0.15 },
+        { ratio: 5.0, level: 0.60, a: 0.001, d: 0.10, s: 0.0, r: 0.05 },
+        { ratio: 2.0, level: 0.50, a: 0.001, d: 0.25, s: 0.0, r: 0.15 },
+        { ratio: 3.0, level: 0.45, a: 0.001, d: 0.25, s: 0.0, r: 0.15 },
+        { ratio: 0.5, level: 0.55, a: 0.001, d: 0.30, s: 0.0, r: 0.20 },
+        { ratio: 4.0, level: 0.35, a: 0.001, d: 0.20, s: 0.0, r: 0.10 }
+      ]
+    },
+    pad: {
+      // Soft atmospheric pad (Halo / Fantasia territory). Very slow swell
+      // and long release; four detuned carriers stacked produce shimmer,
+      // a single high-ratio modulator (op2 → op1) adds a subtle brightness
+      // that breathes in with the attack.
+      algorithm: { mods: [[2,1],[4,3]], carriers: [1,3,5,6] },
+      ops: [
+        { ratio: 1.0,   level: 0.70, a: 0.50, d: 0.40, s: 0.90, r: 1.4 },
+        { ratio: 4.0,   level: 0.25, a: 0.60, d: 0.50, s: 0.60, r: 1.0 },
+        { ratio: 2.0,   level: 0.45, a: 0.50, d: 0.40, s: 0.85, r: 1.4 },
+        { ratio: 0.5,   level: 0.20, a: 0.60, d: 0.50, s: 0.60, r: 1.0 },
+        { ratio: 1.005, level: 0.50, a: 0.55, d: 0.40, s: 0.90, r: 1.4 },
+        { ratio: 0.503, level: 0.40, a: 0.55, d: 0.40, s: 0.85, r: 1.4 }
       ]
     }
   };
