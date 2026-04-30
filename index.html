@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web MIDI debug</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #1a1d27;
+    --border: #2a2f3d;
+    --text: #e6e8ee;
+    --muted: #8b92a5;
+    --accent: #6ee7b7;
+    --warn: #fbbf24;
+    --error: #f87171;
+    --note: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  button { background: var(--accent); color: #0f1117; border: 0; padding: 10px 16px;
+    border-radius: 6px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .status { padding: 10px 12px; border-radius: 6px; background: var(--panel); border: 1px solid var(--border);
+    margin-bottom: 16px; }
+  .status.ok { border-color: var(--accent); }
+  .status.warn { border-color: var(--warn); }
+  .status.error { border-color: var(--error); }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 8px 10px; border-radius: 4px; background: rgba(255,255,255,0.02);
+    margin-bottom: 4px; font-size: 13px; }
+  li .name { font-weight: 600; }
+  li .meta { color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  #log { height: 320px; overflow-y: auto; background: #0a0c12; border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px; font-size: 12px; }
+  #log .entry { padding: 2px 6px; white-space: pre; }
+  #log .entry .ts { color: var(--muted); }
+  #log .entry .src { color: var(--accent); }
+  #log .entry.note-on { color: var(--note); }
+  #log .entry.note-off { color: var(--muted); }
+  #log .entry.cc { color: var(--warn); }
+  .controls { display: flex; gap: 8px; margin-bottom: 12px; }
+  code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Web MIDI debug</h1>
+  <p class="sub">Lists MIDI devices visible to the browser and logs incoming messages in real time.</p>
+
+  <div id="status" class="status">Click <strong>Request MIDI access</strong> to begin.</div>
+
+  <div class="controls">
+    <button id="request">Request MIDI access</button>
+    <button id="clear" class="secondary" disabled>Clear log</button>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h2>Inputs</h2>
+      <ul id="inputs"><li class="empty">none</li></ul>
+    </div>
+    <div class="panel">
+      <h2>Outputs</h2>
+      <ul id="outputs"><li class="empty">none</li></ul>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Message log</h2>
+    <div id="log"></div>
+  </div>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $('status');
+  const inputsEl = $('inputs');
+  const outputsEl = $('outputs');
+  const logEl = $('log');
+  const requestBtn = $('request');
+  const clearBtn = $('clear');
+
+  let access = null;
+
+  const setStatus = (msg, kind = '') => {
+    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+    statusEl.innerHTML = msg;
+  };
+
+  const renderPorts = (map, el) => {
+    const items = [...map.values()];
+    if (items.length === 0) { el.innerHTML = '<li class="empty">none</li>'; return; }
+    el.innerHTML = items.map(p => `
+      <li>
+        <div class="name">${escapeHtml(p.name || '(unnamed)')}</div>
+        <div class="meta">
+          ${escapeHtml(p.manufacturer || 'unknown manufacturer')}
+          &middot; state: ${p.state}
+          &middot; connection: ${p.connection}
+          &middot; id: ${escapeHtml(p.id)}
+        </div>
+      </li>`).join('');
+  };
+
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+
+  const noteName = (n) => {
+    const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    return names[n % 12] + (Math.floor(n / 12) - 1);
+  };
+
+  const decode = (data) => {
+    const [s, d1, d2] = data;
+    const type = s & 0xf0;
+    const ch = (s & 0x0f) + 1;
+    if (type === 0x90 && d2 > 0) return { kind: 'note-on',  text: `ch${ch} note-on  ${noteName(d1)} (${d1}) vel=${d2}` };
+    if (type === 0x80 || (type === 0x90 && d2 === 0))
+                                  return { kind: 'note-off', text: `ch${ch} note-off ${noteName(d1)} (${d1}) vel=${d2}` };
+    if (type === 0xb0)            return { kind: 'cc',       text: `ch${ch} cc       ${d1}=${d2}` };
+    if (type === 0xe0)            return { kind: '',         text: `ch${ch} pitchbend ${((d2 << 7) | d1) - 8192}` };
+    if (type === 0xa0)            return { kind: '',         text: `ch${ch} aftertouch ${d1}=${d2}` };
+    if (type === 0xc0)            return { kind: '',         text: `ch${ch} program  ${d1}` };
+    if (type === 0xd0)            return { kind: '',         text: `ch${ch} channel-pressure ${d1}` };
+    return { kind: '', text: `raw ${[...data].map(b => b.toString(16).padStart(2,'0')).join(' ')}` };
+  };
+
+  const log = (srcName, data) => {
+    const { kind, text } = decode(data);
+    const ts = new Date().toISOString().substr(11, 12);
+    const line = document.createElement('div');
+    line.className = 'entry' + (kind ? ' ' + kind : '');
+    line.innerHTML = `<span class="ts">${ts}</span> <span class="src">[${escapeHtml(srcName)}]</span> ${escapeHtml(text)}`;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    if (logEl.children.length > 500) logEl.removeChild(logEl.firstChild);
+  };
+
+  const wireInputs = () => {
+    for (const input of access.inputs.values()) {
+      input.onmidimessage = (e) => log(input.name || input.id, e.data);
+    }
+  };
+
+  const refresh = () => {
+    renderPorts(access.inputs, inputsEl);
+    renderPorts(access.outputs, outputsEl);
+    wireInputs();
+  };
+
+  requestBtn.addEventListener('click', async () => {
+    if (!navigator.requestMIDIAccess) {
+      setStatus('Web MIDI is not supported in this browser. Try Chrome, Edge, or Safari 16.4+.', 'error');
+      return;
+    }
+    try {
+      requestBtn.disabled = true;
+      access = await navigator.requestMIDIAccess({ sysex: false });
+      const total = access.inputs.size + access.outputs.size;
+      setStatus(`MIDI access granted. ${access.inputs.size} input(s), ${access.outputs.size} output(s).`,
+                total > 0 ? 'ok' : 'warn');
+      refresh();
+      access.onstatechange = (e) => {
+        const p = e.port;
+        const ts = new Date().toISOString().substr(11, 12);
+        const line = document.createElement('div');
+        line.className = 'entry';
+        line.innerHTML = `<span class="ts">${ts}</span> <span class="src">[system]</span> ` +
+          `${escapeHtml(p.type)} "${escapeHtml(p.name)}" ${p.state}/${p.connection}`;
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+        refresh();
+      };
+      clearBtn.disabled = false;
+    } catch (err) {
+      setStatus(`MIDI access failed: ${escapeHtml(err.message || String(err))}`, 'error');
+      requestBtn.disabled = false;
+    }
+  });
+
+  clearBtn.addEventListener('click', () => { logEl.innerHTML = ''; });
+
+  if (!navigator.requestMIDIAccess) {
+    setStatus('Web MIDI is not supported in this browser. Try Chrome, Edge, or Safari 16.4+.', 'error');
+    requestBtn.disabled = true;
+  } else if (!window.isSecureContext) {
+    setStatus('Page is not in a secure context. Web MIDI requires HTTPS or localhost.', 'warn');
+  }
+})();
+</script>
+</body>
+</html>
