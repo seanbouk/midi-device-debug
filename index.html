@@ -37,6 +37,10 @@
     font-weight: 400; text-transform: none; letter-spacing: normal; cursor: pointer; margin-left: 10px; }
   .link-action:hover { color: var(--text); }
   .link-action[aria-disabled="true"] { opacity: 0.35; pointer-events: none; }
+  .filter-toggle { color: var(--muted); font-size: 12px; font-weight: 400; text-transform: none;
+    letter-spacing: normal; margin-left: 10px; cursor: pointer; user-select: none; }
+  .filter-toggle input { margin: 0 4px 0 0; vertical-align: -2px; accent-color: var(--muted); }
+  #log.hide-rt .entry.rt { display: none; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
   @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px;
@@ -60,6 +64,7 @@
   #log .entry { padding: 2px 6px; white-space: pre; }
   #log .entry .ts { color: var(--muted); }
   #log .entry .src { color: var(--accent); }
+  #log .entry .count { color: var(--muted); font-variant-numeric: tabular-nums; }
   #log .entry.note-on { color: var(--note); }
   #log .entry.note-off { color: var(--muted); }
   #log .entry.cc { color: var(--warn); }
@@ -222,7 +227,7 @@
   </div>
 
   <div class="panel">
-    <h2 class="with-action">Message log<a id="clear" class="link-action" href="#" aria-disabled="true">clear</a></h2>
+    <h2 class="with-action">Message log<a id="record" class="link-action" href="#" aria-disabled="true">record</a><a id="pause" class="link-action" href="#" aria-disabled="true">pause</a><a id="clear" class="link-action" href="#" aria-disabled="true">clear</a><label class="filter-toggle"><input type="checkbox" id="hide-rt" checked>hide system real-time</label></h2>
     <div id="log"></div>
   </div>
 </main>
@@ -237,7 +242,11 @@
   const logEl = $('log');
   const requestBtn = $('request');
   const clearBtn = $('clear');
+  const recordBtn = $('record');
+  const pauseBtn = $('pause');
+  const hideRtEl = $('hide-rt');
   const panicBtn = $('panic');
+  let recording = true;
 
   const engineSelect = $('engine');
   const oscEngineEl = $('engine-osc');
@@ -299,14 +308,30 @@
     return { kind: '', text: `raw ${[...data].map(b => b.toString(16).padStart(2,'0')).join(' ')}` };
   };
 
+  let lastEntry = null;
+  let lastKey = null;
+  let lastCount = 1;
+
   const log = (srcName, data) => {
+    if (!recording) return;
     const { kind, text } = decode(data);
     const ts = new Date().toISOString().substr(11, 12);
+    const isRt = data[0] >= 0xF8;
+    const key = srcName + '\x00' + text;
+    if (lastKey === key && lastEntry && lastEntry.parentNode === logEl) {
+      lastCount += 1;
+      lastEntry.innerHTML = `<span class="ts">${ts}</span> <span class="src">[${escapeHtml(srcName)}]</span> ${escapeHtml(text)} <span class="count">×${lastCount}</span>`;
+      if (!isRt || !hideRtEl.checked) logEl.scrollTop = logEl.scrollHeight;
+      return;
+    }
     const line = document.createElement('div');
-    line.className = 'entry' + (kind ? ' ' + kind : '');
+    line.className = 'entry' + (kind ? ' ' + kind : '') + (isRt ? ' rt' : '');
     line.innerHTML = `<span class="ts">${ts}</span> <span class="src">[${escapeHtml(srcName)}]</span> ${escapeHtml(text)}`;
     logEl.appendChild(line);
-    logEl.scrollTop = logEl.scrollHeight;
+    lastEntry = line;
+    lastKey = key;
+    lastCount = 1;
+    if (!isRt || !hideRtEl.checked) logEl.scrollTop = logEl.scrollHeight;
     if (logEl.children.length > 500) logEl.removeChild(logEl.firstChild);
   };
 
@@ -316,6 +341,8 @@
     line.className = 'entry';
     line.innerHTML = `<span class="ts">${ts}</span> <span class="src">[system]</span> ${escapeHtml(text)}`;
     logEl.appendChild(line);
+    lastEntry = null;
+    lastKey = null;
     logEl.scrollTop = logEl.scrollHeight;
   };
 
@@ -1685,7 +1712,31 @@
     e.preventDefault();
     if (!isLinkEnabled(clearBtn)) return;
     logEl.innerHTML = '';
+    lastEntry = null;
+    lastKey = null;
   });
+  const setRecording = (on) => {
+    recording = on;
+    setLinkEnabled(recordBtn, !on);
+    setLinkEnabled(pauseBtn, on);
+    if (!on) { lastEntry = null; lastKey = null; }
+  };
+  recordBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!isLinkEnabled(recordBtn)) return;
+    setRecording(true);
+  });
+  pauseBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!isLinkEnabled(pauseBtn)) return;
+    setRecording(false);
+  });
+  const applyRtFilter = () => {
+    logEl.classList.toggle('hide-rt', hideRtEl.checked);
+    if (hideRtEl.checked) logEl.scrollTop = logEl.scrollHeight;
+  };
+  hideRtEl.addEventListener('change', applyRtFilter);
+  applyRtFilter();
 
   requestBtn.addEventListener('click', async () => {
     if (!navigator.requestMIDIAccess) {
@@ -1707,6 +1758,7 @@
       };
       setLinkEnabled(clearBtn, true);
       setLinkEnabled(panicBtn, true);
+      setRecording(true);
       swapEngine(engineSelect.value);
     } catch (err) {
       setStatus(`MIDI access failed: ${escapeHtml(err.message || String(err))}`, 'error');
