@@ -2,6 +2,8 @@
 
 Single-page Web MIDI debug tool. Lists MIDI devices visible to the browser, logs incoming messages, and routes them through one of five sound engines for instant audible feedback.
 
+Live: <https://seanbouk.github.io/midi-device-debug/>
+
 ## Run locally
 
 ```bash
@@ -13,7 +15,7 @@ Then open <http://localhost:8000/> in Chrome or Edge and click **Request MIDI ac
 ## What's in it
 
 - **Device listing** — input and output ports the browser sees, with manufacturer / state / connection info. Hot-plug supported via `onstatechange`.
-- **Message log** — decoded note-on/off, CC, pitch bend, aftertouch, program change, channel pressure with timestamps and channel.
+- **Message log** — decoded note-on/off, CC, pitch bend, aftertouch, program change, channel pressure with timestamps and channel. Consecutive identical messages collapse into a single line with a `×N` counter and a refreshed timestamp, so heartbeat traffic doesn't bury real events. Top-right controls: `record` / `pause` to freeze the log without disconnecting, `clear` to wipe it, and `hide system real-time` to suppress the `0xF8`/`0xFE`-type chatter (timing clock, active sensing, etc.) — hidden via CSS rather than dropped, so untick to bring everything back.
 - **Sound engines** — pick from the dropdown:
   - **PSG Synth** — one oscillator per voice. Pick from sine, triangle, sawtooth, square, pulse 25%, pulse 12.5%, or noise. Per-waveform gain compensation keeps perceived loudness roughly consistent across timbres; pulses use precomputed `PeriodicWave`s built from each duty cycle's Fourier coefficients.
   - **FM synth** — six sine operators per voice, twelve hand-picked DX-style presets (EP, bell, bass, brass, marimba, harp, strings, whistle, harmonica, tubular, orch hit, pad). Each preset is an algorithm (carrier/modulator topology) plus per-op ratio, level, and ADSR envelope; modulation index β scales with pitch via per-connection gain.
